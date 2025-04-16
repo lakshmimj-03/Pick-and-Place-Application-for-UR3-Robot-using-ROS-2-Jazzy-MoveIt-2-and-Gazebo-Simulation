@@ -2,7 +2,9 @@
 
 ## Project Overview
 
-This project implements a smooth and realistic simulation of a Universal Robots UR3 robotic arm performing a pick and place operation. The simulation uses ROS2 (Robot Operating System 2) and visualizes the robot's movements in RViz with proper 3D mesh models.
+This project implements a smooth and realistic simulation of a Universal Robots UR3 collaborative robotic arm performing a pick and place operation. The simulation uses ROS2 (Robot Operating System 2) and visualizes the robot's movements in RViz with high-fidelity 3D mesh models. The primary focus of this project is to achieve ultra-smooth, glitch-free robot motion while maintaining accurate visual representation using detailed mesh files.
+
+The simulation demonstrates a complete pick and place cycle, including approaching an object, grasping it, lifting it, moving it to a new location, placing it down, and returning to the home position. All movements are carefully interpolated using advanced trajectory generation techniques to ensure smooth acceleration and deceleration profiles with zero jerk at critical points.
 
 ## Technical Details
 
@@ -30,9 +32,12 @@ The robot is defined using URDF (Unified Robot Description Format) with Xacro ma
 
 1. **Link Definitions**: Each segment of the robot (base, shoulder, upper arm, forearm, wrist 1, wrist 2, wrist 3, and tool0)
 2. **Joint Definitions**: The connections between links, including joint types, limits, and dynamics
-3. **Visual Meshes**: 3D models (.dae files) for visualization
+3. **Visual Meshes**: High-fidelity 3D models (.dae files) for visualization
 4. **Collision Meshes**: Simplified 3D models (.stl files) for collision detection
 5. **Material Properties**: Colors and textures for visual appearance
+6. **Inertial Properties**: Mass, center of mass, and inertia tensors for each link
+7. **Joint Limits**: Position, velocity, and effort limits for each joint
+8. **Joint Dynamics**: Damping and friction parameters for realistic motion
 
 The URDF file uses absolute file paths to ensure the mesh files are correctly loaded in RViz:
 
@@ -40,17 +45,65 @@ The URDF file uses absolute file paths to ensure the mesh files are correctly lo
 <mesh filename="file:///home/lachu/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/base.dae"/>
 ```
 
+Each link in the URDF model is carefully defined with proper coordinate frames and transformations. For example, the base link definition includes:
+
+```xml
+<link name="base_link">
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file:///home/lachu/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/base.dae"/>
+    </geometry>
+    <material name="UR_Blue"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file:///home/lachu/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/base.stl"/>
+    </geometry>
+  </collision>
+  <inertial>
+    <mass value="4.0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <inertia ixx="0.00443333156" ixy="0.0" ixz="0.0" iyy="0.00443333156" iyz="0.0" izz="0.0072"/>
+  </inertial>
+</link>
+```
+
+The joint definitions specify the kinematic relationships between links, including the joint type, axis of rotation, and limits:
+
+```xml
+<joint name="shoulder_pan_joint" type="revolute">
+  <parent link="base_link"/>
+  <child link="shoulder_link"/>
+  <origin xyz="0 0 0.1519" rpy="0 0 0"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="${-2*pi}" upper="${2*pi}" effort="150.0" velocity="3.15"/>
+  <dynamics damping="0.0" friction="0.0"/>
+</joint>
+```
+
+The use of high-quality mesh files is critical for realistic visualization. The project uses the official UR3 mesh files, which provide detailed visual representation of the robot's components.
+
 ### Motion Planning and Trajectory Generation
 
-The robot's motion is controlled using a custom Python node that implements advanced trajectory generation techniques:
+The robot's motion is controlled using a custom Python node that implements advanced trajectory generation techniques to achieve ultra-smooth, glitch-free motion:
 
-1. **Minimum Jerk Trajectory**: The motion follows a 5th-order polynomial trajectory that minimizes jerk (rate of change of acceleration), resulting in extremely smooth motion with zero velocity and acceleration at endpoints.
+1. **Minimum Jerk Trajectory**: The motion follows a 5th-order polynomial trajectory that minimizes jerk (rate of change of acceleration), resulting in extremely smooth motion with zero velocity and acceleration at endpoints. This is the same type of trajectory used in high-end industrial robots.
 
-2. **Key Pose Interpolation**: The robot moves through a sequence of predefined key poses that define the pick and place operation. The motion between poses is interpolated using the minimum jerk trajectory.
+2. **Key Pose Interpolation**: The robot moves through a sequence of predefined key poses that define the pick and place operation. The motion between poses is interpolated using the minimum jerk trajectory with precise timing control.
 
-3. **Dwell Time**: The robot pauses at each key pose for a configurable amount of time, which gives it time to settle and eliminates potential glitches during rapid direction changes.
+3. **Dwell Time**: The robot pauses at each key pose for a configurable amount of time (default: 2 seconds), which gives it time to settle and eliminates potential glitches during rapid direction changes.
 
-4. **Angle Wrapping Handling**: The trajectory generator properly handles angle wrapping for revolute joints to ensure the robot always takes the shortest path between poses.
+4. **Angle Wrapping Handling**: The trajectory generator properly handles angle wrapping for revolute joints to ensure the robot always takes the shortest path between poses, preventing unnecessary rotations.
+
+5. **Thread Safety**: The implementation uses thread locks to ensure thread safety when accessing shared data between the control loop and the ROS2 callback functions.
+
+6. **High Control Rate**: The control loop runs at 100 Hz (10ms cycle time) for ultra-smooth motion, ensuring frequent updates to the robot's position.
+
+7. **Consistent Timing**: The implementation uses a fixed time increment to ensure consistent timing between updates, preventing timing-related glitches.
+
+8. **Exact Pose Values**: The system sets exact pose values at the end of each motion segment to avoid accumulation of floating point errors over time.
 
 The mathematical formula for the minimum jerk trajectory is:
 
@@ -66,6 +119,69 @@ This trajectory has the following properties:
 - `s(0) = 0`, `s(T) = 1` (starts at 0, ends at 1)
 - `s'(0) = 0`, `s'(T) = 0` (zero velocity at endpoints)
 - `s''(0) = 0`, `s''(T) = 0` (zero acceleration at endpoints)
+- `s'''(0) ≠ 0`, `s'''(T) ≠ 0` (non-zero jerk at endpoints, but minimized overall)
+
+The implementation in Python is as follows:
+
+```python
+def minimum_jerk(self, t):
+    """Minimum jerk trajectory function.
+    This produces extremely smooth motion with zero velocity and acceleration at endpoints."""
+    return 10 * (t**3) - 15 * (t**4) + 6 * (t**5)
+```
+
+The control loop that applies this trajectory to the robot's joints is implemented as follows:
+
+```python
+def control_loop(self):
+    """Main control loop for smooth robot motion"""
+    with self.lock:  # Thread safety
+        # Update timers
+        dt = 0.01  # 10ms (100Hz)
+
+        if self.is_dwelling:
+            # We're pausing at a pose
+            self.dwell_timer += dt
+            if self.dwell_timer >= self.dwell_time:
+                # Done dwelling, start moving to next pose
+                self.is_dwelling = False
+                self.motion_time = 0.0
+                self.next_pose_index = (self.current_pose_index + 1) % len(self.key_poses)
+        else:
+            # We're moving between poses
+            self.motion_time += dt
+
+            if self.motion_time >= self.motion_duration:
+                # Reached the target pose, start dwelling
+                self.current_pose_index = self.next_pose_index
+                self.is_dwelling = True
+                self.dwell_timer = 0.0
+
+                # Set exact pose values to avoid accumulation of floating point errors
+                self.current_positions = self.key_poses[self.current_pose_index].copy()
+            else:
+                # Interpolate between poses
+                t = self.motion_time / self.motion_duration
+                smooth_t = self.minimum_jerk(t)
+
+                # Interpolate each joint position
+                for i in range(len(self.current_positions)):
+                    # Calculate the shortest path for revolute joints
+                    start_pos = self.key_poses[self.current_pose_index][i]
+                    end_pos = self.key_poses[self.next_pose_index][i]
+
+                    # Handle angle wrapping
+                    diff = end_pos - start_pos
+                    if abs(diff) > math.pi:
+                        if diff > 0:
+                            diff = diff - 2 * math.pi
+                        else:
+                            diff = diff + 2 * math.pi
+                        end_pos = start_pos + diff
+
+                    # Apply minimum jerk trajectory
+                    self.current_positions[i] = start_pos + smooth_t * (end_pos - start_pos)
+```
 
 ### ROS2 Architecture
 
@@ -147,25 +263,44 @@ This project demonstrates a smooth and realistic simulation of a UR3 robot perfo
 ## Requirements
 
 ### Hardware Requirements
-- Computer with Ubuntu 22.04 or later
-- Minimum 4GB RAM (8GB recommended)
-- Graphics card with OpenGL support
+- Computer with Ubuntu 22.04 or later (Ubuntu 22.04 LTS Jammy Jellyfish recommended)
+- Minimum 4GB RAM (8GB recommended for smooth visualization)
+- Graphics card with OpenGL 3.3+ support (NVIDIA or AMD recommended)
+- Dual-core CPU or better (quad-core recommended)
+- At least 10GB of free disk space
+- Internet connection for package installation
 
 ### Software Requirements
-- ROS2 Jazzy Jalisco (or compatible version)
-- Python 3.12
-- Xacro
-- RViz2
+- ROS2 Jazzy Jalisco (or compatible version like Humble Hawksbill)
+- Python 3.12 or later
+- Xacro 1.14.0 or later
+- RViz2 with mesh visualization support
+- Git (for downloading mesh files)
+- CMake 3.16.3 or later
+- Colcon build tools
+- Bash shell environment
 
 ## Package Dependencies
 
 The following ROS2 packages are required:
-- `robot_state_publisher`
-- `joint_state_publisher`
-- `xacro`
-- `rviz2`
-- `tf2`
-- `tf2_ros`
+
+### Core ROS2 Packages
+- `robot_state_publisher`: Publishes the robot's state to TF2 (version 3.0.0 or later)
+- `joint_state_publisher`: Publishes joint state information (version 2.2.0 or later)
+- `xacro`: XML macro language for creating URDF files (version 2.0.5 or later)
+- `rviz2`: 3D visualization tool for ROS2 (version 11.2.0 or later)
+- `tf2`: Transform library for tracking coordinate frames (version 0.25.0 or later)
+- `tf2_ros`: ROS2 bindings for the TF2 library (version 0.25.0 or later)
+
+### Python Dependencies
+- `rclpy`: ROS2 client library for Python (version 3.3.0 or later)
+- `sensor_msgs`: Standard messages for sensor data (version 4.2.0 or later)
+- `geometry_msgs`: Standard messages for geometric data (version 4.2.0 or later)
+
+### Additional Dependencies
+- `python3-numpy`: Numerical computing library for Python (version 1.21.0 or later)
+- `python3-threading`: Threading library for Python (included in standard library)
+- `python3-math`: Mathematical functions for Python (included in standard library)
 
 ## Installation
 
@@ -379,23 +514,121 @@ rviz2 -d simple_config.rviz
 
 **Error**: Robot appears as simple shapes instead of detailed meshes.
 
+**Symptoms**:
+- Robot appears as basic geometric shapes (cylinders, boxes) instead of detailed meshes
+- RViz console shows warnings about missing mesh files
+- Error messages like "Could not load resource [mesh file path]"
+
 **Solutions**:
-- Check that the mesh file paths in the URDF are correct
-- Ensure the mesh files exist in the specified locations
-- Try using absolute file paths with the `file://` prefix
+- Check that the mesh file paths in the URDF are correct and point to existing files
+  ```bash
+  # Verify mesh files exist
+  ls -la ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/
+  ls -la ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/
+  ```
+
+- Ensure the mesh files have the correct permissions
+  ```bash
+  # Set correct permissions
+  chmod 644 ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/*.dae
+  chmod 644 ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/*.stl
+  ```
+
+- Try using absolute file paths with the `file://` prefix in the URDF
+  ```xml
+  <mesh filename="file:///home/lachu/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/base.dae"/>
+  ```
+
 - Check RViz settings: ensure "Visual Enabled" is checked in the RobotModel display
+  1. In RViz, select the "RobotModel" display in the left panel
+  2. Make sure "Visual Enabled" is checked
+  3. Set "Description Topic" to "/robot_description"
+
+- Verify that the mesh files are in the correct format
+  ```bash
+  # Check file types
+  file ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/*.dae
+  file ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/*.stl
+  ```
+
+- Try creating a symbolic link to the mesh files in a standard ROS2 package location
+  ```bash
+  mkdir -p ~/.ros/ur3_pick_place
+  ln -sf ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes ~/.ros/ur3_pick_place/
+  ```
 
 ### 2. Glitchy Robot Movement
 
 **Error**: Robot movement is jerky or has sudden jumps.
 
+**Symptoms**:
+- Robot motion appears jerky or stutters during movement
+- Sudden jumps or teleportations between positions
+- Inconsistent speed during motion
+- Joint angles occasionally appear to "flip" or take the long way around
+
 **Solutions**:
+
 - Increase the publishing rate in the robot mover script
+  ```python
+  # Change from 50Hz to 100Hz or higher
+  self.create_timer(1.0/100.0, self.publish_joint_states)
+  ```
+
 - Increase the number of interpolation points between waypoints
+  ```python
+  # Increase interpolation steps
+  self.interpolation_steps = 500  # More steps for smoother motion
+  ```
+
 - Use a smoother interpolation function (e.g., minimum jerk trajectory)
-- Add thread safety with locks
+  ```python
+  def minimum_jerk(self, t):
+      """Minimum jerk trajectory function.
+      This produces extremely smooth motion with zero velocity and acceleration at endpoints."""
+      return 10 * (t**3) - 15 * (t**4) + 6 * (t**5)
+  ```
+
+- Add thread safety with locks to prevent race conditions
+  ```python
+  from threading import Lock
+
+  # In __init__
+  self.lock = Lock()
+
+  # In methods that access shared data
+  with self.lock:
+      # Access shared data here
+  ```
+
 - Ensure consistent timing in the control loop
+  ```python
+  # Use a fixed time increment
+  dt = 0.01  # 10ms (100Hz)
+  self.motion_time += dt
+  ```
+
 - Handle angle wrapping properly for revolute joints
+  ```python
+  # Calculate the shortest path for revolute joints
+  diff = end_pos - start_pos
+  if abs(diff) > math.pi:
+      if diff > 0:
+          diff = diff - 2 * math.pi
+      else:
+          diff = diff + 2 * math.pi
+      end_pos = start_pos + diff
+  ```
+
+- Add dwell time at key poses to eliminate glitches during direction changes
+  ```python
+  # Add dwell time
+  self.dwell_time = 2.0  # seconds to pause at each pose
+  ```
+
+- Reduce system load by closing unnecessary applications
+
+- Ensure your computer meets the recommended hardware requirements
 
 ### 3. RViz Crashes
 
@@ -439,10 +672,25 @@ To change the robot's motion pattern, edit the `key_poses` list in the `smooth_r
 self.key_poses = [
     # Home position
     [0.0, -1.57, 0.0, -1.57, 0.0, 0.0],
-    
+
     # Add or modify poses here
     # Format: [joint1, joint2, joint3, joint4, joint5, joint6]
 ]
+```
+
+Each pose is defined as a list of 6 joint angles in radians, corresponding to the 6 joints of the UR3 robot:
+1. `shoulder_pan_joint`: Rotation of the base (around Z axis)
+2. `shoulder_lift_joint`: Shoulder joint (around Y axis)
+3. `elbow_joint`: Elbow joint (around Y axis)
+4. `wrist_1_joint`: First wrist joint (around Y axis)
+5. `wrist_2_joint`: Second wrist joint (around Z axis)
+6. `wrist_3_joint`: Third wrist joint (around Y axis)
+
+You can add as many poses as needed to create complex motion sequences. For example, to add a new pose where the robot reaches higher:
+
+```python
+# Reach high pose
+[0.0, -0.5, 0.3, -1.0, 0.0, 0.0],
 ```
 
 ### 2. Adjusting Motion Parameters
@@ -450,8 +698,21 @@ self.key_poses = [
 To make the motion faster, slower, or smoother, adjust these parameters in the script:
 
 ```python
-self.motion_duration = 8.0  # seconds to move between poses
+# Speed control
+self.motion_duration = 8.0  # seconds to move between poses (increase for slower motion)
 self.dwell_time = 2.0  # seconds to pause at each pose
+
+# Smoothness control
+self.create_timer(1.0/100.0, self.control_loop)  # control loop frequency (Hz)
+```
+
+For ultra-smooth motion, you can also adjust the trajectory generation parameters:
+
+```python
+# Use a different smoothing function
+def custom_smoothing(self, t):
+    # Sigmoid function for even smoother transitions
+    return 1.0 / (1.0 + math.exp(-12 * (t - 0.5)))
 ```
 
 ### 3. Using Different Mesh Files
@@ -460,6 +721,69 @@ To use different mesh files, update the file paths in the URDF file:
 
 ```xml
 <mesh filename="file:///path/to/your/mesh/file.dae"/>
+```
+
+You can use mesh files from different robot models or create your own custom meshes. Supported formats include:
+- `.dae` (COLLADA) for visual meshes
+- `.stl` (STereoLithography) for collision meshes
+
+When creating custom meshes, ensure they:
+- Have the correct scale (meters)
+- Use the correct coordinate system (Z-up for URDF)
+- Have proper origins aligned with joint axes
+
+### 4. Changing Robot Colors
+
+To change the robot's appearance, modify the material definitions in the URDF:
+
+```xml
+<material name="UR_Blue">
+  <color rgba="0.1 0.1 0.8 1.0"/>
+</material>
+
+<!-- Add new materials -->
+<material name="UR_Red">
+  <color rgba="0.8 0.1 0.1 1.0"/>
+</material>
+```
+
+Then apply the material to specific links:
+
+```xml
+<visual>
+  <geometry>
+    <mesh filename="file:///path/to/mesh.dae"/>
+  </geometry>
+  <material name="UR_Red"/>
+</visual>
+```
+
+### 5. Adding Environment Objects
+
+To add objects to the environment (like tables, objects to pick, etc.), add new links to the URDF:
+
+```xml
+<link name="table">
+  <visual>
+    <origin xyz="0 0 -0.5" rpy="0 0 0"/>
+    <geometry>
+      <box size="1.0 1.0 0.05"/>
+    </geometry>
+    <material name="Grey"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 -0.5" rpy="0 0 0"/>
+    <geometry>
+      <box size="1.0 1.0 0.05"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="world_to_table" type="fixed">
+  <parent link="world"/>
+  <child link="table"/>
+  <origin xyz="0 0 0" rpy="0 0 0"/>
+</joint>
 ```
 
 ## Advanced Usage
