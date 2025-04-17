@@ -1,5 +1,5 @@
-# UR3 Pick and Place Project Report - Part 1
-## Project Overview and Architecture
+# UR3 Robot Pick and Place Simulation - Report 1
+## Project Overview and Robot Model
 
 ## Table of Contents
 - [Introduction](#introduction)
@@ -11,9 +11,9 @@
 
 ## Introduction
 
-This project implements a complete pick and place application using a Universal Robots UR3 robot arm in a simulated environment. The system leverages ROS 2 Jazzy Jalisco as the robotics middleware, MoveIt 2 for motion planning, and Gazebo for physics simulation. The application demonstrates a full robotic manipulation pipeline from perception to execution.
+This project implements a smooth and realistic simulation of a Universal Robots UR3 collaborative robotic arm performing a pick and place operation. The simulation uses ROS2 (Robot Operating System 2) and visualizes the robot's movements in RViz with high-fidelity 3D mesh models. The primary focus of this project is to achieve ultra-smooth, glitch-free robot motion while maintaining accurate visual representation using detailed mesh files.
 
-The primary goal of this project is to showcase how different ROS 2 components can be integrated to create a functional robotic system capable of identifying, grasping, and relocating objects in a structured environment. This implementation serves as a foundation for more complex manipulation tasks and can be extended to work with real hardware with minimal modifications.
+The simulation demonstrates a complete pick and place cycle, including approaching an object, grasping it, lifting it, moving it to a new location, placing it down, and returning to the home position. All movements are carefully interpolated using advanced trajectory generation techniques to ensure smooth acceleration and deceleration profiles with zero jerk at critical points.
 
 ## System Architecture
 
@@ -22,37 +22,48 @@ The system architecture follows a modular design pattern typical of ROS 2 applic
 ### High-Level Architecture
 
 ```
-                                +-------------------+
-                                |                   |
-                                |  Pick Place Node  |
-                                |                   |
-                                +--------+----------+
-                                         |
-                                         v
-+---------------+    +-----------+    +--+------+    +------------+
-|               |    |           |    |         |    |            |
-| Object        |<-->| MoveIt 2  |<-->| ROS 2   |<-->| Gazebo     |
-| Detection     |    | Planning  |    | Control |    | Simulation |
-|               |    |           |    |         |    |            |
-+---------------+    +-----------+    +---------+    +------------+
+                  +-------------------+
+                  |                   |
+                  | smooth_robot_mover|
+                  |                   |
+                  +--------+----------+
+                           |
+                           | /joint_states
+                           v
++---------------+    +-----+------+    +------------+
+|               |    |            |    |            |
+| URDF          |--->| robot_state|    | RViz       |
+| Description   |    | publisher  |--->| Visualization|
+|               |    |            |    |            |
++---------------+    +------------+    +------------+
+                           |
+                           | /tf, /tf_static
+                           v
+                     +------------+
+                     |            |
+                     | TF Tree    |
+                     |            |
+                     +------------+
 ```
 
 ### Component Interaction Flow
 
-1. **Pick Place Node**: Central orchestrator that manages the overall pick and place operation
-2. **Object Detection**: Identifies objects and their poses in the environment (simulated in this implementation)
-3. **MoveIt 2 Planning**: Generates collision-free trajectories for the robot arm
-4. **ROS 2 Control**: Executes the planned trajectories and manages the gripper
-5. **Gazebo Simulation**: Provides physics simulation and visualization of the robot and environment
+1. **smooth_robot_mover**: Custom Python node that generates and publishes smooth joint trajectories
+2. **robot_state_publisher**: Publishes the robot's state (joint positions) to TF2
+3. **URDF Description**: Defines the physical structure, joints, and properties of the robot
+4. **RViz Visualization**: Provides a 3D view of the robot and its environment
+5. **TF Tree**: Coordinate frames that define the positions and orientations of the robot's links
 
 ### Communication Interfaces
 
 The components communicate through standard ROS 2 interfaces:
 
 - **Topics**: For continuous data streams (joint states, robot state, etc.)
-- **Services**: For request-response interactions (planning scene updates, etc.)
-- **Actions**: For long-running tasks with feedback (trajectory execution, gripper control)
+  - **/joint_states**: Joint positions published by the smooth_robot_mover node
+  - **/robot_description**: URDF description of the robot
+  - **/tf** and **/tf_static**: Transform frames published by the robot_state_publisher
 - **Parameters**: For configuration and tuning of components
+  - **robot_description**: URDF string parameter used by the robot_state_publisher
 
 ## Core Components
 
@@ -189,1600 +200,1341 @@ XML-based formats are used for structural definitions:
 3. **Python Modules (.py)**: Implementation of nodes and utilities
 4. **C++ Source (.cpp, .hpp)**: Implementation of performance-critical components
 
-# UR3 Pick and Place Project Report - Part 2
-## Technical Implementation Details and File Explanations
+
+# UR3 Robot Pick and Place Simulation - Report 2
+## Motion Planning, Trajectory Generation, and ROS2 Architecture
 
 ## Table of Contents
-- [Configuration Files in Detail](#configuration-files-in-detail)
-- [Launch Files](#launch-files)
-- [Robot Description](#robot-description)
-- [Motion Planning Implementation](#motion-planning-implementation)
-- [Controllers Configuration](#controllers-configuration)
-- [Pick and Place Implementation](#pick-and-place-implementation)
-- [Object Detection](#object-detection)
+- [Motion Planning and Trajectory Generation](#motion-planning-and-trajectory-generation)
+- [Minimum Jerk Trajectory](#minimum-jerk-trajectory)
+- [Key Pose Interpolation](#key-pose-interpolation)
+- [Angle Wrapping Handling](#angle-wrapping-handling)
+- [Control Loop Implementation](#control-loop-implementation)
+- [ROS2 Architecture](#ros2-architecture)
+- [Nodes and Components](#nodes-and-components)
+- [Topics and Messages](#topics-and-messages)
+- [Parameters](#parameters)
+- [Visualization in RViz](#visualization-in-rviz)
+- [Pick and Place Sequence](#pick-and-place-sequence)
+- [Executable Script Commands](#executable-script-commands)
 
-## Configuration Files in Detail
+## Motion Planning and Trajectory Generation
 
-This section provides an in-depth explanation of each configuration file, its purpose, format, and key parameters.
+The UR3 robot's motion is controlled using a custom Python node that implements advanced trajectory generation techniques to achieve ultra-smooth, glitch-free motion. This section details the algorithms and approaches used to generate these trajectories.
 
-### 1. MoveIt Planning Configuration (`moveit_planning.yaml`)
+### Minimum Jerk Trajectory
 
-The `moveit_planning.yaml` file configures the motion planning capabilities of MoveIt 2. It is a YAML file with a hierarchical structure that defines planning plugins, request adapters, and planner-specific parameters.
+The core of the smooth motion generation is the minimum jerk trajectory algorithm. This approach generates a trajectory that minimizes the jerk (rate of change of acceleration), resulting in extremely smooth motion with zero velocity and acceleration at endpoints. This is the same type of trajectory used in high-end industrial robots.
 
-```yaml
-move_group:
-  ros__parameters:
-    planning_plugin: "ompl_interface/OMPLPlanner"
-    request_adapters: [default_planner_request_adapters/AddTimeOptimalParameterization, default_planner_request_adapters/ResolveConstraintFrames, default_planner_request_adapters/FixWorkspaceBounds, default_planner_request_adapters/FixStartStateBounds, default_planner_request_adapters/FixStartStateCollision, default_planner_request_adapters/FixStartStatePathConstraints]
-    start_state_max_bounds_error: 0.1
-    planning_pipelines: [ompl]
+The mathematical formula for the minimum jerk trajectory is:
 
-    planner_configs:
-      RRTConnectkConfigDefault:
-        type: geometric::RRTConnect
-      RRTstarkConfigDefault:
-        type: geometric::RRTstar
-      TRRTkConfigDefault:
-        type: geometric::TRRT
-
-    ur_manipulator:
-      default_planner_config: RRTConnectkConfigDefault
-      planner_configs:
-        - RRTConnectkConfigDefault
-        - RRTstarkConfigDefault
-        - TRRTkConfigDefault
-      projection_evaluator: joints(shoulder_pan_joint,shoulder_lift_joint)
-      longest_valid_segment_fraction: 0.005
-
-    gripper:
-      default_planner_config: RRTConnectkConfigDefault
-      planner_configs:
-        - RRTConnectkConfigDefault
-
-ompl:
-  ros__parameters:
-    planning_plugin: "ompl_interface/OMPLPlanner"
+```
+s(t) = 10(t/T)³ - 15(t/T)⁴ + 6(t/T)⁵
 ```
 
-Key components:
-- **planning_plugin**: Specifies the planning interface to use (OMPL in this case)
-- **request_adapters**: A list of adapters that process the motion plan request and response
-- **planner_configs**: Defines different motion planning algorithms available
-- **ur_manipulator**: Configuration specific to the UR3 arm planning group
-- **gripper**: Configuration specific to the gripper planning group
+Where:
+- `s(t)` is the normalized position at time `t`
+- `T` is the total duration of the motion
 
-### 2. Kinematics Configuration (`kinematics.yaml`)
+This trajectory has the following properties:
+- `s(0) = 0`, `s(T) = 1` (starts at 0, ends at 1)
+- `s'(0) = 0`, `s'(T) = 0` (zero velocity at endpoints)
+- `s''(0) = 0`, `s''(T) = 0` (zero acceleration at endpoints)
+- `s'''(0) ≠ 0`, `s'''(T) ≠ 0` (non-zero jerk at endpoints, but minimized overall)
 
-The `kinematics.yaml` file configures the forward and inverse kinematics solvers for each planning group.
-
-```yaml
-/**:
-  ros__parameters:
-    move_group:
-      robot_description_kinematics:
-        ur_manipulator:
-          kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
-          kinematics_solver_search_resolution: 0.005
-          kinematics_solver_timeout: 0.005
-          kinematics_solver_attempts: 3
-        gripper:
-          kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
-          kinematics_solver_search_resolution: 0.005
-          kinematics_solver_timeout: 0.005
-          kinematics_solver_attempts: 3
-```
-
-Key parameters:
-- **kinematics_solver**: The plugin to use for solving kinematics (KDL in this case)
-- **kinematics_solver_search_resolution**: Resolution for searching joint space
-- **kinematics_solver_timeout**: Maximum time allowed for solving
-- **kinematics_solver_attempts**: Number of attempts before giving up
-
-### 3. Joint Limits Configuration (`joint_limits.yaml`)
-
-The `joint_limits.yaml` file defines velocity and acceleration limits for each joint of the robot.
-
-```yaml
-/**:
-  ros__parameters:
-    joint_limits:
-      # UR3 Joints
-      shoulder_pan_joint:
-        has_velocity_limits: true
-        max_velocity: 3.14
-        has_acceleration_limits: true
-        max_acceleration: 5.0
-      # ... other joints ...
-      
-      # Gripper Joints
-      gripper_finger_joint:
-        has_velocity_limits: true
-        max_velocity: 2.0
-        has_acceleration_limits: true
-        max_acceleration: 2.0
-      # ... other gripper joints ...
-```
-
-These limits are used by the motion planners and controllers to ensure that the generated trajectories respect the physical capabilities of the robot.
-
-### 4. Controller Configuration (`ur3_controllers.yaml`)
-
-The `ur3_controllers.yaml` file configures the ROS 2 controllers that execute the planned trajectories.
-
-```yaml
-controller_manager:
-  ros__parameters:
-    update_rate: 100  # Hz
-
-    joint_state_broadcaster:
-      type: joint_state_broadcaster/JointStateBroadcaster
-
-    arm_controller:
-      type: joint_trajectory_controller/JointTrajectoryController
-
-    gripper_controller:
-      type: position_controllers/GripperActionController
-
-    # Add a forward command controller for direct joint control
-    forward_position_controller:
-      type: forward_command_controller/ForwardCommandController
-
-arm_controller:
-  ros__parameters:
-    joints:
-      - shoulder_pan_joint
-      - shoulder_lift_joint
-      - elbow_joint
-      - wrist_1_joint
-      - wrist_2_joint
-      - wrist_3_joint
-    # ... other parameters ...
-
-gripper_controller:
-  ros__parameters:
-    joints:
-      - gripper_finger_joint
-    mimic_joints:
-      - gripper_finger2_joint
-    # ... other parameters ...
-```
-
-Key components:
-- **controller_manager**: Configures the controller manager node
-- **arm_controller**: Joint trajectory controller for the UR3 arm
-- **gripper_controller**: Specialized controller for the gripper
-- **forward_position_controller**: Simple controller for direct position commands
-
-### 5. MoveIt Controllers Configuration (`moveit_controllers.yaml`)
-
-The `moveit_controllers.yaml` file maps MoveIt planning groups to ROS 2 controllers.
-
-```yaml
-/**:
-  ros__parameters:
-    moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
-    moveit_simple_controller_manager:
-      controller_names:
-        - arm_controller
-        - gripper_controller
-
-      arm_controller:
-        type: FollowJointTrajectory
-        action_ns: follow_joint_trajectory
-        default: true
-        joints:
-          - shoulder_pan_joint
-          - shoulder_lift_joint
-          - elbow_joint
-          - wrist_1_joint
-          - wrist_2_joint
-          - wrist_3_joint
-
-      gripper_controller:
-        type: GripperCommand
-        action_ns: gripper_cmd
-        default: true
-        joints:
-          - gripper_finger_joint
-          - gripper_finger2_joint
-```
-
-This configuration tells MoveIt which controllers to use for executing trajectories for each planning group.
-
-## Launch Files
-
-Launch files coordinate the startup of multiple nodes and set their parameters. The project uses Python-based launch files (`.launch.py`) which provide more flexibility than XML-based launch files.
-
-### 1. Gazebo Simulation Launch (`gazebo_simulation.launch.py`)
-
-This launch file starts the Gazebo simulation environment with the UR3 robot:
+The implementation in Python is as follows:
 
 ```python
-def generate_launch_description():
-    # ... parameter declarations ...
-    
-    # Load robot description
-    robot_description_content = Command([
-        PathJoinSubstitution([FindExecutable(name="xacro")]),
-        " ",
-        PathJoinSubstitution([ur3_pick_place_package, "urdf", "ur3_with_gripper.urdf.xacro"]),
-    ])
-    
-    # ... other parameter loading ...
-    
-    # Create launch description
-    ld = LaunchDescription(declared_arguments)
-    
-    # Add Gazebo nodes
-    ld.add_action(
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource([
-                PathJoinSubstitution([
-                    FindPackageShare('gazebo_ros'), 'launch', 'gazebo.launch.py'
-                ])
-            ]),
-            launch_arguments={'world': world_path}.items(),
-        )
-    )
-    
-    # Add robot state publisher
-    ld.add_action(
-        Node(
-            package="robot_state_publisher",
-            executable="robot_state_publisher",
-            name="robot_state_publisher",
-            output="screen",
-            parameters=[{"robot_description": robot_description_content}],
-        )
-    )
-    
-    # ... other nodes ...
-    
-    return ld
+def minimum_jerk(self, t):
+    """Minimum jerk trajectory function.
+    This produces extremely smooth motion with zero velocity and acceleration at endpoints."""
+    return 10 * (t**3) - 15 * (t**4) + 6 * (t**5)
 ```
 
-Key components:
-- **Robot Description Loading**: Uses xacro to process the robot description
-- **Gazebo Launch**: Includes the standard Gazebo launch file with a custom world
-- **Robot State Publisher**: Publishes the robot state to TF
-- **Controller Spawning**: Loads and starts the required controllers
+This function takes a normalized time value `t` (ranging from 0 to 1) and returns a normalized position value (also ranging from 0 to 1). The actual joint positions are then calculated by interpolating between the start and end positions using this normalized value.
 
-### 2. Pick and Place Demo Launch (`pick_place_demo.launch.py`)
+### Key Pose Interpolation
 
-This launch file starts the complete pick and place demo:
+The robot moves through a sequence of predefined key poses that define the pick and place operation. These key poses are defined as arrays of joint angles (in radians) for each of the 6 joints of the UR3 robot.
 
 ```python
-def generate_launch_description():
-    # ... parameter declarations and loading ...
-    
-    # Create MoveIt configuration dictionary
-    moveit_config = {
-        "robot_description": robot_description_content,
-        "robot_description_semantic": robot_description_semantic_content,
-        "robot_description_kinematics": kinematics_yaml,
-        "robot_description_planning": joint_limits_yaml,
-        "moveit_simple_controller_manager": moveit_controllers_yaml,
-        "ompl": ompl_planning_yaml,
-        "planning_pipelines": ["ompl"],
-        # ... other parameters ...
-    }
-    
-    # Create launch description
-    ld = LaunchDescription(declared_arguments)
-    
-    # Add robot state publisher
-    ld.add_action(
-        Node(
-            package="robot_state_publisher",
-            executable="robot_state_publisher",
-            name="robot_state_publisher",
-            output="screen",
-            parameters=[{"robot_description": robot_description_content}],
-        )
-    )
-    
-    # Add MoveIt node
-    ld.add_action(
-        Node(
-            package="moveit_ros_move_group",
-            executable="move_group",
-            name="move_group",
-            output="screen",
-            parameters=[moveit_config],
-        )
-    )
-    
-    # ... other nodes ...
-    
-    # Add pick and place node
-    ld.add_action(
-        Node(
-            package="ur3_pick_place",
-            executable="pick_place_node",
-            name="pick_place_node",
-            output="screen",
-            parameters=[{"use_sim_time": True}],
-        )
-    )
-    
-    return ld
+self.key_poses = [
+    # Home position
+    [0.0, -1.57, 0.0, -1.57, 0.0, 0.0],
+
+    # Pre-grasp approach
+    [0.5, -1.0, 0.5, -1.57, 0.0, 0.0],
+
+    # Grasp position
+    [0.5, -0.8, 0.8, -1.57, 0.0, 0.0],
+
+    # Lift
+    [0.5, -1.0, 0.5, -1.57, 0.0, 0.0],
+
+    # Transport
+    [-0.5, -1.0, 0.5, -1.57, 0.0, 0.0],
+
+    # Place position
+    [-0.5, -0.8, 0.8, -1.57, 0.0, 0.0],
+
+    # Post-place retreat
+    [-0.5, -1.0, 0.5, -1.57, 0.0, 0.0],
+
+    # Return to home
+    [0.0, -1.57, 0.0, -1.57, 0.0, 0.0]
+]
 ```
 
-Key components:
-- **MoveIt Configuration**: Comprehensive configuration for MoveIt
-- **Move Group Node**: The central MoveIt node for planning
-- **RViz**: For visualization
-- **Pick and Place Node**: The application-specific node
+The motion between these key poses is interpolated using the minimum jerk trajectory with precise timing control. This approach allows for complex motion sequences to be defined using a small number of key poses, while ensuring smooth transitions between them.
 
-## Robot Description
+### Dwell Time
 
-The robot description defines the physical structure, joints, and properties of the robot.
-
-### 1. URDF and Xacro Files
-
-The main robot description file is `ur3_with_gripper.urdf.xacro`, which combines the UR3 robot description with a custom gripper:
-
-```xml
-<?xml version="1.0"?>
-<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur3_with_gripper">
-  
-  <!-- Include the UR3 robot description -->
-  <xacro:include filename="$(find ur_description)/urdf/ur3.urdf.xacro" />
-  
-  <!-- Include the gripper description -->
-  <xacro:include filename="$(find ur3_pick_place)/urdf/gripper.urdf.xacro" />
-  
-  <!-- Instantiate the UR3 -->
-  <xacro:ur3_robot prefix="" />
-  
-  <!-- Attach the gripper to the robot -->
-  <joint name="gripper_attachment_joint" type="fixed">
-    <parent link="tool0"/>
-    <child link="gripper_base_link"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-  
-  <!-- Instantiate the gripper -->
-  <xacro:gripper prefix="" />
-  
-  <!-- Gazebo-specific elements -->
-  <gazebo>
-    <!-- Plugins for controllers -->
-    <plugin name="gazebo_ros_control" filename="libgazebo_ros_control.so">
-      <robotNamespace>/</robotNamespace>
-      <robotSimType>gazebo_ros_control/DefaultRobotHWSim</robotSimType>
-    </plugin>
-  </gazebo>
-  
-</robot>
-```
-
-Xacro is an XML macro language that allows for more modular and reusable robot descriptions.
-
-### 2. Semantic Robot Description Format (SRDF)
-
-The SRDF file (`ur3.srdf`) adds semantic information to the robot model:
-
-```xml
-<?xml version="1.0" ?>
-<robot name="ur3_with_gripper">
-    <!--GROUPS: Representation of a set of joints and links-->
-    <group name="ur_manipulator">
-        <chain base_link="base_link" tip_link="tool0" />
-    </group>
-    
-    <!-- Gripper group -->
-    <group name="gripper">
-        <chain base_link="gripper_base_link" tip_link="gripper_finger_link" />
-    </group>
-    
-    <!-- End effector group -->
-    <group name="endeffector">
-        <link name="gripper_base_link" />
-        <link name="gripper_finger_link" />
-        <link name="gripper_finger2_link" />
-    </group>
-    
-    <!--GROUP STATES: Define named states for the robot-->
-    <group_state name="home" group="ur_manipulator">
-        <joint name="elbow_joint" value="1.5707" />
-        <joint name="shoulder_lift_joint" value="-1.5707" />
-        <joint name="shoulder_pan_joint" value="0" />
-        <joint name="wrist_1_joint" value="-1.5707" />
-        <joint name="wrist_2_joint" value="0" />
-        <joint name="wrist_3_joint" value="0" />
-    </group_state>
-    
-    <!-- ... other group states ... -->
-    
-    <!-- Define the end effector -->
-    <end_effector name="gripper" parent_link="tool0" group="gripper" parent_group="ur_manipulator" />
-    
-    <!--DISABLE COLLISIONS: Define which links should not check for collisions-->
-    <disable_collisions link1="base_link" link2="shoulder_link" reason="Adjacent"/>
-    <!-- ... other collision exclusions ... -->
-</robot>
-```
-
-Key components:
-- **Planning Groups**: Define logical groups of joints and links
-- **Group States**: Named configurations for easy reference
-- **End Effectors**: Define end effectors and their parent links
-- **Collision Exclusions**: Specify which links should not check for collisions with each other
-
-## Motion Planning Implementation
-
-The motion planning implementation leverages MoveIt 2's capabilities through both C++ and Python interfaces.
-
-### 1. C++ Implementation (`pick_place_node.cpp`)
-
-The C++ implementation provides high-performance motion planning and execution:
-
-```cpp
-bool PickPlaceNode::executePick(const std::string& object_id)
-{
-    // Get object pose
-    geometry_msgs::msg::Pose object_pose;
-    if (!getObjectPose(object_id, object_pose)) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to get object pose");
-        return false;
-    }
-    
-    // Open gripper
-    controlGripper(1.0);  // 1.0 = fully open
-    
-    // Set pre-grasp pose
-    geometry_msgs::msg::Pose pre_grasp_pose = object_pose;
-    pre_grasp_pose.position.z += 0.1;  // 10cm above object
-    
-    // Plan and move to pre-grasp pose
-    arm_group_->setPoseTarget(pre_grasp_pose);
-    moveit::planning_interface::MoveGroupInterface::Plan plan;
-    bool success = (arm_group_->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    
-    if (!success) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to plan to pre-grasp pose");
-        return false;
-    }
-    
-    success = (arm_group_->execute(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    
-    if (!success) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to move to pre-grasp pose");
-        return false;
-    }
-    
-    // ... continue with approach, grasp, and lift ...
-    
-    return true;
-}
-```
-
-Key components:
-- **MoveGroupInterface**: C++ interface to MoveIt's planning capabilities
-- **Planning and Execution**: Generate and execute motion plans
-- **Pose Manipulation**: Set target poses for the robot
-- **Gripper Control**: Control the gripper through a separate interface
-
-### 2. Python Implementation (`pick_place_node.py`)
-
-The Python implementation provides a more accessible interface for rapid development:
+To eliminate potential glitches during rapid direction changes, the robot pauses at each key pose for a configurable amount of time (default: 2 seconds). This dwell time gives the robot time to settle and ensures that the motion is visually smooth and realistic.
 
 ```python
-def pick_object(self, object_id, object_pose):
-    # Open gripper
-    self.control_gripper(1.0)  # 1.0 = fully open
-    
-    # Set pre-grasp pose
-    pre_grasp_pose = copy.deepcopy(object_pose)
-    pre_grasp_pose.position.z += 0.1  # 10cm above object
-    
-    # Plan and move to pre-grasp pose
-    self.arm_group.set_pose_target(pre_grasp_pose)
-    success = self.arm_group.go(wait=True)
-    self.arm_group.stop()
-    
-    if not success:
-        self.get_logger().error('Failed to move to pre-grasp pose')
-        return False
-    
-    # ... continue with approach, grasp, and lift ...
-    
-    return True
+self.dwell_time = 2.0  # seconds to pause at each pose
 ```
 
-The Python implementation follows a similar structure to the C++ version but with a more concise syntax.
+During the dwell time, the robot maintains the exact joint positions of the key pose, ensuring stability and preventing any unwanted motion.
 
-## Controllers Configuration
+### Angle Wrapping Handling
 
-The controllers are configured to provide smooth and accurate motion execution.
-
-### 1. Joint Trajectory Controller
-
-The joint trajectory controller executes time-parameterized joint trajectories:
-
-```yaml
-arm_controller:
-  ros__parameters:
-    joints:
-      - shoulder_pan_joint
-      - shoulder_lift_joint
-      - elbow_joint
-      - wrist_1_joint
-      - wrist_2_joint
-      - wrist_3_joint
-
-    command_interfaces:
-      - position
-
-    state_interfaces:
-      - position
-      - velocity
-
-    state_publish_rate: 50.0
-    action_monitor_rate: 20.0
-    constraints:
-      stopped_velocity_tolerance: 0.01
-      goal_time: 0.0
-      shoulder_pan_joint:
-        trajectory: 0.05
-        goal: 0.03
-      # ... other joint constraints ...
-```
-
-Key parameters:
-- **joints**: The joints controlled by this controller
-- **command_interfaces**: The type of commands accepted (position in this case)
-- **state_interfaces**: The state information provided by the controller
-- **constraints**: Tolerances for trajectory execution
-
-### 2. Gripper Controller
-
-The gripper controller is specialized for controlling the gripper:
-
-```yaml
-gripper_controller:
-  ros__parameters:
-    joints:
-      - gripper_finger_joint
-    mimic_joints:
-      - gripper_finger2_joint
-    action_monitor_rate: 20
-    goal_tolerance: 0.01
-    max_effort: 50.0
-    allow_stalling: true
-    command_interfaces:
-      - position
-    state_interfaces:
-      - position
-      - velocity
-```
-
-Key parameters:
-- **joints**: The primary joint of the gripper
-- **mimic_joints**: Joints that mimic the primary joint
-- **goal_tolerance**: Acceptable error for reaching the target position
-- **max_effort**: Maximum effort applied by the gripper
-
-## Pick and Place Implementation
-
-The pick and place implementation orchestrates the overall operation.
-
-### 1. Pick and Place Pipeline
-
-The pick and place pipeline consists of the following steps:
-
-1. **Initialization**: Move to a ready position
-2. **Object Detection**: Identify objects in the workspace
-3. **Pick Operation**:
-   - Plan and move to a pre-grasp position
-   - Open the gripper
-   - Move down to the grasp position
-   - Close the gripper
-   - Lift the object
-4. **Place Operation**:
-   - Plan and move to a pre-place position
-   - Move down to the place position
-   - Open the gripper
-   - Move back to a safe position
-5. **Completion**: Return to the home position
-
-### 2. Implementation in C++ (`pick_place_node.cpp`)
-
-```cpp
-void PickPlaceNode::executePipeline()
-{
-    // Cancel the timer to prevent multiple executions
-    timer_->cancel();
-    
-    // Detect objects in the scene
-    detectObjects();
-    
-    // Get available objects
-    std::vector<std::string> objects = getAvailableObjects();
-    
-    if (objects.empty()) {
-        RCLCPP_INFO(this->get_logger(), "No objects detected");
-        return;
-    }
-    
-    // Pick the first object
-    std::string object_id = objects[0];
-    RCLCPP_INFO(this->get_logger(), "Attempting to pick object: %s", object_id.c_str());
-    
-    bool pick_success = executePick(object_id);
-    
-    if (!pick_success) {
-        RCLCPP_ERROR(this->get_logger(), "Pick operation failed");
-        return;
-    }
-    
-    // Place the object
-    RCLCPP_INFO(this->get_logger(), "Attempting to place object: %s", object_id.c_str());
-    
-    bool place_success = executePlace(object_id);
-    
-    if (!place_success) {
-        RCLCPP_ERROR(this->get_logger(), "Place operation failed");
-        return;
-    }
-    
-    RCLCPP_INFO(this->get_logger(), "Pick and place operation completed successfully");
-}
-```
-
-### 3. Implementation in Python (`pick_place_node.py`)
+One of the challenges in controlling revolute joints is handling angle wrapping. For example, moving from 170° to -170° should result in a 20° movement, not a 340° movement in the opposite direction. The trajectory generator properly handles angle wrapping for revolute joints to ensure the robot always takes the shortest path between poses, preventing unnecessary rotations.
 
 ```python
-def execute_pick_place(self):
-    self.timer.cancel()  # Run only once
-
-    # Visualize objects
-    self.visualize_objects()
-
-    # Move to home position
-    self.get_logger().info('Moving to home position')
-    self.arm_group.set_named_target('home')
-    success = self.arm_group.go(wait=True)
-    self.arm_group.stop()
-
-    if not success:
-        self.get_logger().error('Failed to move to home position')
-        return
-
-    # Open gripper
-    self.control_gripper(1.0)
-    time.sleep(1.0)
-
-    # Pick red cube
-    self.get_logger().info('Picking red cube')
-    success = self.pick_object('red_cube', self.red_cube_pose)
-
-    if not success:
-        self.get_logger().error('Failed to pick red cube')
-        return
-        
-    # ... continue with place operation ...
+# Calculate the shortest path for revolute joints
+diff = end_pos - start_pos
+if abs(diff) > math.pi:
+    if diff > 0:
+        diff = diff - 2 * math.pi
+    else:
+        diff = diff + 2 * math.pi
+    end_pos = start_pos + diff
 ```
 
-## Object Detection
+This code checks if the difference between the start and end positions is greater than π radians (180°). If it is, it adjusts the end position to ensure the robot takes the shortest path.
 
-In this simulation, object detection is simplified and uses predefined object poses.
+## Control Loop Implementation
 
-### 1. Simulated Object Detection
-
-```cpp
-void PickPlaceNode::detectObjects()
-{
-    // In a real system, this would use sensors to detect objects
-    // For this simulation, we use predefined object poses
-    
-    // Add a red cube
-    geometry_msgs::msg::Pose red_cube_pose;
-    red_cube_pose.position.x = 0.5;
-    red_cube_pose.position.y = 0.0;
-    red_cube_pose.position.z = 0.025;
-    red_cube_pose.orientation.w = 1.0;
-    
-    objects_["red_cube"] = red_cube_pose;
-    
-    // Add a blue cylinder
-    geometry_msgs::msg::Pose blue_cylinder_pose;
-    blue_cylinder_pose.position.x = 0.5;
-    blue_cylinder_pose.position.y = 0.2;
-    blue_cylinder_pose.position.z = 0.1;
-    blue_cylinder_pose.orientation.w = 1.0;
-    
-    objects_["blue_cylinder"] = blue_cylinder_pose;
-    
-    // Visualize the objects
-    for (const auto& [id, pose] : objects_) {
-        publishPoseMarker(pose, id, 0, 1.0, 0.0, 0.0);
-    }
-}
-```
-
-In a real-world implementation, this would be replaced with actual perception using cameras or other sensors.
-
-
-# UR3 Pick and Place Project Report - Part 3
-## Usage Instructions, Troubleshooting, and Advanced Features
-
-## Table of Contents
-- [Installation and Setup](#installation-and-setup)
-- [Running the Application](#running-the-application)
-- [Customizing the Application](#customizing-the-application)
-- [Troubleshooting](#troubleshooting)
-- [Advanced Features](#advanced-features)
-- [Extending the Project](#extending-the-project)
-- [Performance Optimization](#performance-optimization)
-- [Real Hardware Integration](#real-hardware-integration)
-
-## Installation and Setup
-
-### Prerequisites
-
-Before installing the UR3 pick and place application, ensure that you have the following prerequisites:
-
-1. **Ubuntu 22.04 (Jammy Jellyfish)**: The operating system required for ROS 2 Jazzy
-2. **ROS 2 Jazzy Jalisco**: The ROS 2 distribution used by this project
-3. **Gazebo Garden**: The simulation environment (installed via ros_gz packages)
-4. **MoveIt 2**: The motion planning framework
-5. **Universal Robots ROS 2 packages**: For the UR3 robot model and controllers
-
-### Installation Steps
-
-1. **Create a ROS 2 workspace**:
-   ```bash
-   mkdir -p ~/ros2_workspaces/ros2_ws/src
-   cd ~/ros2_workspaces/ros2_ws/src
-   ```
-
-2. **Clone the repository**:
-   ```bash
-   git clone https://github.com/username/ur3_pick_place.git
-   ```
-
-3. **Install dependencies**:
-   ```bash
-   cd ~/ros2_workspaces/ros2_ws
-   rosdep install --from-paths src --ignore-src -r -y
-   ```
-
-4. **Build the workspace**:
-   ```bash
-   colcon build --symlink-install
-   ```
-
-5. **Source the workspace**:
-   ```bash
-   source ~/ros2_workspaces/ros2_ws/install/setup.bash
-   ```
-
-### Configuration
-
-After installation, you may need to customize the configuration for your specific setup:
-
-1. **Robot Model**: If you're using a different UR robot model (e.g., UR5 instead of UR3), you'll need to modify the URDF files accordingly.
-
-2. **Gripper**: If you're using a different gripper, you'll need to update the gripper URDF and controller configuration.
-
-3. **Motion Planning Parameters**: You can adjust the motion planning parameters in `config/moveit_planning.yaml` to optimize for your specific use case.
-
-4. **Controller Parameters**: You can tune the controller parameters in `config/ur3_controllers.yaml` for better performance.
-
-## Running the Application
-
-### Starting the Simulation
-
-To launch the Gazebo simulation with the UR3 robot:
-
-```bash
-ros2 launch ur3_pick_place gazebo_simulation.launch.py
-```
-
-This will:
-- Start Gazebo with the pick_place world
-- Spawn the UR3 robot with a gripper
-- Load necessary controllers
-- Start RViz for visualization
-- Initialize MoveIt for motion planning
-
-### Running the Pick and Place Demo
-
-To run the complete pick and place demo:
-
-```bash
-ros2 launch ur3_pick_place pick_place_demo.launch.py
-```
-
-This launch file:
-1. Starts the Gazebo simulation
-2. Loads the UR3 robot with a gripper
-3. Initializes MoveIt for motion planning
-4. Starts the pick and place node
-5. Automatically triggers the pick and place operation
-
-### Manual Triggering
-
-You can manually trigger the pick and place operation by publishing to the `/trigger_pick_place` topic:
-
-```bash
-ros2 topic pub --once /trigger_pick_place std_msgs/msg/Bool "data: true"
-```
-
-### Using the Test Script
-
-For a quick test of the pick and place functionality:
-
-```bash
-ros2 launch ur3_pick_place test_pick_place.launch.py
-```
-
-This launches a simplified version of the demo that automatically triggers the pick and place operation after a short delay.
-
-## Customizing the Application
-
-### Adding New Objects
-
-To add new objects to the scene:
-
-1. **Create Gazebo models** for the new objects in the `models` directory
-2. **Update the object detection** in `src/pick_place_node.cpp` or `ur3_pick_place/pick_place_node.py`
-3. **Modify the pick and place pipeline** to handle the new objects
-
-Example of adding a new object in C++:
-
-```cpp
-void PickPlaceNode::detectObjects()
-{
-    // Existing objects...
-    
-    // Add a new green box
-    geometry_msgs::msg::Pose green_box_pose;
-    green_box_pose.position.x = 0.5;
-    green_box_pose.position.y = -0.2;
-    green_box_pose.position.z = 0.05;
-    green_box_pose.orientation.w = 1.0;
-    
-    objects_["green_box"] = green_box_pose;
-    
-    // Visualize the objects
-    for (const auto& [id, pose] : objects_) {
-        publishPoseMarker(pose, id, 0, 1.0, 0.0, 0.0);
-    }
-}
-```
-
-### Modifying the Pick and Place Sequence
-
-To modify the pick and place sequence:
-
-1. **Edit the `executePick` and `executePlace` methods** in `src/pick_place_node.cpp` or the corresponding methods in `ur3_pick_place/pick_place_node.py`
-2. **Adjust the pre-grasp and pre-place poses** to match your specific requirements
-3. **Modify the gripper control** to accommodate different object types
-
-Example of modifying the pre-grasp pose in Python:
+The control loop that applies the trajectory to the robot's joints is implemented as a high-frequency timer callback function. This loop runs at 100 Hz (10ms cycle time) to ensure ultra-smooth motion with frequent updates to the robot's position.
 
 ```python
-def pick_object(self, object_id, object_pose):
-    # Open gripper
-    self.control_gripper(1.0)  # 1.0 = fully open
-    
-    # Set pre-grasp pose with a different approach angle
-    pre_grasp_pose = copy.deepcopy(object_pose)
-    pre_grasp_pose.position.z += 0.15  # 15cm above object
-    
-    # Create a quaternion for a 45-degree rotation around Y
-    q = quaternion_from_euler(0, math.pi/4, 0)
-    pre_grasp_pose.orientation.x = q[0]
-    pre_grasp_pose.orientation.y = q[1]
-    pre_grasp_pose.orientation.z = q[2]
-    pre_grasp_pose.orientation.w = q[3]
-    
-    # Plan and move to pre-grasp pose
-    self.arm_group.set_pose_target(pre_grasp_pose)
-    success = self.arm_group.go(wait=True)
-    self.arm_group.stop()
-    
-    # ... rest of the method ...
+def control_loop(self):
+    """Main control loop for smooth robot motion"""
+    with self.lock:  # Thread safety
+        # Update timers
+        dt = 0.01  # 10ms (100Hz)
+
+        if self.is_dwelling:
+            # We're pausing at a pose
+            self.dwell_timer += dt
+            if self.dwell_timer >= self.dwell_time:
+                # Done dwelling, start moving to next pose
+                self.is_dwelling = False
+                self.motion_time = 0.0
+                self.next_pose_index = (self.current_pose_index + 1) % len(self.key_poses)
+        else:
+            # We're moving between poses
+            self.motion_time += dt
+
+            if self.motion_time >= self.motion_duration:
+                # Reached the target pose, start dwelling
+                self.current_pose_index = self.next_pose_index
+                self.is_dwelling = True
+                self.dwell_timer = 0.0
+
+                # Set exact pose values to avoid accumulation of floating point errors
+                self.current_positions = self.key_poses[self.current_pose_index].copy()
+            else:
+                # Interpolate between poses
+                t = self.motion_time / self.motion_duration
+                smooth_t = self.minimum_jerk(t)
+
+                # Interpolate each joint position
+                for i in range(len(self.current_positions)):
+                    # Calculate the shortest path for revolute joints
+                    start_pos = self.key_poses[self.current_pose_index][i]
+                    end_pos = self.key_poses[self.next_pose_index][i]
+
+                    # Handle angle wrapping
+                    diff = end_pos - start_pos
+                    if abs(diff) > math.pi:
+                        if diff > 0:
+                            diff = diff - 2 * math.pi
+                        else:
+                            diff = diff + 2 * math.pi
+                        end_pos = start_pos + diff
+
+                    # Apply minimum jerk trajectory
+                    self.current_positions[i] = start_pos + smooth_t * (end_pos - start_pos)
 ```
 
-### Changing Motion Planning Parameters
+Key features of the control loop implementation include:
 
-To optimize motion planning for your specific use case:
+1. **Thread Safety**: The implementation uses thread locks to ensure thread safety when accessing shared data between the control loop and the ROS2 callback functions.
 
-1. **Edit `config/moveit_planning.yaml`** to change the planning algorithm or its parameters
-2. **Modify the planning pipeline** to use different request adapters
-3. **Adjust the planning time limits** to balance between planning quality and speed
+2. **Consistent Timing**: The implementation uses a fixed time increment (`dt = 0.01`) to ensure consistent timing between updates, preventing timing-related glitches.
 
-Example of changing the planning algorithm:
+3. **State Machine**: The control loop implements a simple state machine with two states: dwelling at a pose and moving between poses.
 
-```yaml
-ur_manipulator:
-  default_planner_config: RRTstarkConfigDefault  # Changed from RRTConnectkConfigDefault
-  planner_configs:
-    - RRTstarkConfigDefault
-    - RRTConnectkConfigDefault
-    - TRRTkConfigDefault
-  projection_evaluator: joints(shoulder_pan_joint,shoulder_lift_joint)
-  longest_valid_segment_fraction: 0.005
+4. **Exact Pose Values**: The system sets exact pose values at the end of each motion segment to avoid accumulation of floating point errors over time.
+
+5. **Smooth Interpolation**: The minimum jerk trajectory function is used to generate smooth interpolation between key poses.
+
+6. **Angle Wrapping Handling**: The control loop properly handles angle wrapping to ensure the robot takes the shortest path between poses.
+
+## ROS2 Architecture
+
+The simulation uses ROS2 (Robot Operating System 2) as the underlying framework for communication, visualization, and control. This section details the ROS2 components used in the project.
+
+### Nodes and Components
+
+The simulation uses the following ROS2 nodes:
+
+1. **robot_state_publisher**: A standard ROS2 node that publishes the robot's state (joint positions) to TF2. This node takes the URDF description of the robot and the current joint positions and publishes the corresponding transforms.
+
+2. **smooth_robot_mover**: A custom Python node that generates and publishes smooth joint trajectories. This node implements the trajectory generation algorithms described above and publishes the resulting joint positions to the `/joint_states` topic.
+
+The relationship between these nodes is illustrated in the following diagram:
+
+```
+                  +-------------------+
+                  |                   |
+                  | smooth_robot_mover|
+                  |                   |
+                  +--------+----------+
+                           |
+                           | /joint_states
+                           v
++---------------+    +-----+------+    +------------+
+|               |    |            |    |            |
+| URDF          |--->| robot_state|    | RViz       |
+| Description   |    | publisher  |--->| Visualization|
+|               |    |            |    |            |
++---------------+    +------------+    +------------+
+                           |
+                           | /tf, /tf_static
+                           v
+                     +------------+
+                     |            |
+                     | TF Tree    |
+                     |            |
+                     +------------+
 ```
 
-## Troubleshooting
+### Topics and Messages
 
-### Common Issues and Solutions
+The simulation uses the following ROS2 topics and message types:
 
-#### 1. Gazebo Simulation Crashes
+1. **/joint_states** (sensor_msgs/JointState): Joint positions published by the smooth_robot_mover node. This topic contains the current position of each joint of the robot.
 
-**Symptoms**:
-- Gazebo crashes shortly after starting
-- Error messages about physics engine failures
+2. **/robot_description** (std_msgs/String): URDF description of the robot, published as a string parameter. This description is used by the robot_state_publisher to generate the TF transforms.
 
-**Solutions**:
-- Check your system resources (CPU, RAM, GPU)
-- Reduce the complexity of the simulation world
-- Update your graphics drivers
-- Try running Gazebo with a different physics engine:
-  ```bash
-  ros2 launch ur3_pick_place gazebo_simulation.launch.py physics:=dart
-  ```
+3. **/tf** and **/tf_static** (tf2_msgs/TFMessage): Transform frames published by the robot_state_publisher. These topics contain the transforms between the different links of the robot, based on the joint positions and the URDF description.
 
-#### 2. Motion Planning Failures
+The JointState message structure is as follows:
 
-**Symptoms**:
-- "Failed to plan" error messages
-- Robot doesn't move or moves to unexpected positions
+```
+std_msgs/Header header
+  uint32 seq
+  time stamp
+  string frame_id
+string[] name
+float64[] position
+float64[] velocity
+float64[] effort
+```
 
-**Solutions**:
-- Increase the planning time:
-  ```yaml
-  move_group:
-    ros__parameters:
-      planning_time: 10.0  # Increase from default
-  ```
-- Check for collisions in the scene
-- Verify that the target pose is reachable
-- Try a different planning algorithm
-- Adjust the joint limits in `config/joint_limits.yaml`
+In this project, only the `name` and `position` fields are used, as the simulation focuses on kinematic motion rather than dynamics.
 
-#### 3. Controller Issues
+### Parameters
 
-**Symptoms**:
-- "Failed to execute trajectory" error messages
-- Robot moves erratically or stops mid-trajectory
+The simulation uses the following ROS2 parameters:
 
-**Solutions**:
-- Check the controller configuration in `config/ur3_controllers.yaml`
-- Adjust the controller constraints:
-  ```yaml
-  arm_controller:
-    ros__parameters:
-      constraints:
-        stopped_velocity_tolerance: 0.05  # Increase tolerance
-        goal_time: 1.0  # Allow more time to reach goal
-  ```
-- Verify that the hardware interface is working correctly
-- Check for joint limits or singularities
+1. **robot_description**: URDF string parameter used by the robot_state_publisher. This parameter contains the complete URDF description of the robot, including all links, joints, visual meshes, collision meshes, and inertial properties.
 
-#### 4. Gripper Control Problems
+2. **use_sim_time**: Boolean parameter that indicates whether to use simulation time or real time. In this project, real time is used, so this parameter is set to `False`.
 
-**Symptoms**:
-- Gripper doesn't open or close
-- Objects slip from the gripper
+These parameters are set when launching the nodes, either through command-line arguments or through a launch file.
 
-**Solutions**:
-- Check the gripper controller configuration
-- Adjust the gripper effort:
-  ```yaml
-  gripper_controller:
-    ros__parameters:
-      max_effort: 100.0  # Increase from default
-  ```
-- Verify that the gripper joints are properly defined in the URDF
-- Check for collisions between the gripper and objects
+## Visualization in RViz
 
-### Debugging Techniques
+The robot is visualized in RViz, which provides a 3D view of the robot and its environment. RViz is a powerful visualization tool that is part of the ROS ecosystem and is widely used for robot visualization and debugging.
 
-#### 1. RViz Visualization
+The visualization includes:
 
-Use RViz to visualize:
-- Robot state
-- Planned trajectories
-- Collision objects
-- Planning scene
+1. **Robot Model**: The 3D mesh models of the robot's links, loaded from the URDF description.
+
+2. **TF Frames**: The coordinate frames of each link, visualized as axes or arrows.
+
+3. **Joint State Information**: The current position of each joint, visualized through the robot model.
+
+RViz is configured through a configuration file (`simple_config.rviz`) that specifies which displays to show and how to configure them. The key displays used in this project are:
+
+1. **RobotModel**: Displays the robot model based on the URDF description and the current joint states.
+
+2. **TF**: Displays the transform frames of the robot.
+
+3. **Grid**: Displays a reference grid to help with spatial orientation.
+
+## Pick and Place Sequence
+
+The simulated pick and place operation consists of the following steps:
+
+1. **Home Position**: The robot starts in its home position, with all joints at their zero positions except for the shoulder lift and wrist 1 joints, which are at -90 degrees (-1.57 radians).
+
+2. **Pre-Grasp Approach**: The robot moves to a position above the object, with the gripper open and aligned with the object.
+
+3. **Grasp Position**: The robot lowers to the object's position, positioning the gripper around the object.
+
+4. **Grasp**: The robot closes its gripper to grasp the object. In this simulation, the grasp is simulated by a rotation of the wrist 3 joint.
+
+5. **Lift**: The robot lifts the object by moving upward, away from the surface.
+
+6. **Transport**: The robot moves the object to the target location, maintaining the grasp.
+
+7. **Place Position**: The robot lowers the object to the target surface, positioning it at the desired location.
+
+8. **Release**: The robot opens its gripper to release the object. Again, this is simulated by a rotation of the wrist 3 joint.
+
+9. **Post-Place Retreat**: The robot lifts away from the placed object, ensuring it doesn't collide with the object.
+
+10. **Return to Home**: The robot returns to its home position, completing the pick and place cycle.
+
+This sequence is defined through the key poses in the `smooth_robot_mover.py` script and is executed continuously, allowing the robot to repeatedly perform the pick and place operation.
+
+## Executable Script Commands
+
+To run the UR3 robot pick and place simulation, several executable script commands are provided. These commands allow you to start the simulation, visualize the robot, and control its behavior.
+
+### Basic Simulation Launch
+
+The most basic way to launch the simulation is using the provided launch script:
 
 ```bash
-ros2 launch ur3_pick_place rviz.launch.py
+cd ~/ros2_workspaces
+./launch_ur3_mesh_visualization.sh
 ```
 
-#### 2. ROS 2 Topic Monitoring
+This script starts all the necessary components: the robot state publisher, the smooth robot mover, and RViz for visualization.
 
-Monitor ROS 2 topics to diagnose issues:
+### Running Components Individually
+
+You can also run each component individually for more control:
+
+Terminal 1 (Robot State Publisher):
+```bash
+cd ~/ros2_workspaces
+source /opt/ros/jazzy/setup.bash
+ros2 run robot_state_publisher robot_state_publisher --ros-args -p robot_description:="$(xacro ur3_absolute_paths_direct.urdf.xacro)"
+```
+
+Terminal 2 (Robot Mover):
+```bash
+cd ~/ros2_workspaces
+source /opt/ros/jazzy/setup.bash
+python3.12 smooth_robot_mover.py
+```
+
+Terminal 3 (RViz):
+```bash
+cd ~/ros2_workspaces
+source /opt/ros/jazzy/setup.bash
+rviz2 -d simple_config.rviz
+```
+
+### Customizing the Simulation
+
+You can customize the simulation by modifying the parameters in the `smooth_robot_mover.py` script:
+
+```bash
+# Edit the script
+nano ~/ros2_workspaces/smooth_robot_mover.py
+
+# After editing, run the simulation
+cd ~/ros2_workspaces
+./launch_ur3_mesh_visualization.sh
+```
+
+Key parameters you might want to modify include:
+
+- `self.key_poses`: The sequence of joint positions that define the pick and place operation
+- `self.motion_duration`: The time (in seconds) to move between poses
+- `self.dwell_time`: The time (in seconds) to pause at each pose
+
+### Monitoring ROS2 Topics
+
+You can monitor the ROS2 topics to see what's happening in the simulation:
 
 ```bash
 # Monitor joint states
 ros2 topic echo /joint_states
 
-# Monitor controller status
-ros2 topic echo /controller_manager/status
+# List all available topics
+ros2 topic list
 
-# Monitor trajectory execution
-ros2 topic echo /arm_controller/state
+# Get information about a topic
+ros2 topic info /joint_states
+
+# Monitor the TF tree
+ros2 run tf2_tools view_frames
 ```
 
-#### 3. Logging
+### Recording the Simulation
 
-Increase the logging level for more detailed information:
+You can record the simulation as a video using ffmpeg:
 
 ```bash
-ros2 run ur3_pick_place pick_place_node --ros-args --log-level debug
+# Install ffmpeg if not already installed
+sudo apt install ffmpeg
+
+# Record the screen
+ffmpeg -f x11grab -s 1920x1080 -i :0.0 -r 30 -c:v libx264 -preset ultrafast -crf 0 output.mp4
 ```
 
-#### 4. Interactive Markers
+### Checking URDF Validity
 
-Use interactive markers in RViz to test different target poses:
+You can check the validity of the URDF file using the check_urdf tool:
 
 ```bash
-ros2 launch ur3_pick_place interactive_marker.launch.py
+# Extract the URDF from the xacro file
+xacro ur3_absolute_paths_direct.urdf.xacro > /tmp/ur3.urdf
+
+# Check the URDF
+check_urdf /tmp/ur3.urdf
 ```
 
-## Advanced Features
+These executable script commands provide a comprehensive set of tools for running, customizing, and debugging the UR3 robot pick and place simulation.
 
-### 1. Cartesian Path Planning
+---
 
-The project supports Cartesian path planning for straight-line motions:
+This report provides a comprehensive explanation of the motion planning, trajectory generation, and ROS2 architecture used in the UR3 Robot Pick and Place Simulation project. The next report will cover implementation details, setup instructions, and troubleshooting.
 
-```cpp
-bool PickPlaceNode::executeCartesianPath(const geometry_msgs::msg::Pose& start_pose,
-                                         const geometry_msgs::msg::Pose& target_pose,
-                                         double eef_step, double jump_threshold)
-{
-    std::vector<geometry_msgs::msg::Pose> waypoints;
-    waypoints.push_back(start_pose);
-    waypoints.push_back(target_pose);
-    
-    moveit_msgs::msg::RobotTrajectory trajectory;
-    double fraction = arm_group_->computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
-    
-    if (fraction < 0.9) {
-        RCLCPP_ERROR(this->get_logger(), "Cartesian path planning failed (%.2f%% achieved)", fraction * 100.0);
-        return false;
-    }
-    
-    // Execute the trajectory
-    moveit::planning_interface::MoveGroupInterface::Plan plan;
-    plan.trajectory_ = trajectory;
-    
-    return (arm_group_->execute(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-}
+
+# UR3 Robot Pick and Place Simulation - Report 3
+## Implementation Details, Setup Instructions, and Troubleshooting
+
+*This comprehensive guide provides detailed information about the implementation, setup instructions, and troubleshooting for the UR3 Robot Pick and Place Simulation. It includes executable script commands, practical examples, and solutions to common issues.*
+
+## Table of Contents
+- [Implementation Details](#implementation-details)
+  - [Thread Safety](#thread-safety)
+  - [Error Handling](#error-handling)
+  - [Performance Optimization](#performance-optimization)
+- [Setup and Installation](#setup-and-installation)
+  - [Hardware Requirements](#hardware-requirements)
+  - [Software Requirements](#software-requirements)
+  - [Package Dependencies](#package-dependencies)
+  - [Installation Steps](#installation-steps)
+- [Project Setup](#project-setup)
+  - [Creating the URDF File](#creating-the-urdf-file)
+  - [Creating the Robot Mover Script](#creating-the-robot-mover-script)
+  - [Creating a Launch Script](#creating-a-launch-script)
+  - [Creating an RViz Configuration](#creating-an-rviz-configuration)
+- [Running the Simulation](#running-the-simulation)
+  - [Using the Launch Script](#using-the-launch-script)
+  - [Running Components Individually](#running-components-individually)
+- [Troubleshooting](#troubleshooting)
+  - [Mesh Files Not Displaying](#mesh-files-not-displaying)
+  - [Glitchy Robot Movement](#glitchy-robot-movement)
+  - [RViz Crashes](#rviz-crashes)
+  - [Robot State Publisher Errors](#robot-state-publisher-errors)
+  - [Python Script Errors](#python-script-errors)
+- [Customizing the Simulation](#customizing-the-simulation)
+  - [Modifying the Robot's Motion](#modifying-the-robots-motion)
+  - [Adjusting Motion Parameters](#adjusting-motion-parameters)
+  - [Using Different Mesh Files](#using-different-mesh-files)
+  - [Changing Robot Colors](#changing-robot-colors)
+  - [Adding Environment Objects](#adding-environment-objects)
+- [Advanced Usage](#advanced-usage)
+  - [Adding Collision Detection](#adding-collision-detection)
+  - [Recording the Simulation](#recording-the-simulation)
+  - [Exporting Joint Trajectories](#exporting-joint-trajectories)
+- [Future Enhancements](#future-enhancements)
+
+## Implementation Details
+
+This section provides detailed information about the implementation of the UR3 Robot Pick and Place Simulation, focusing on aspects that ensure robustness, reliability, and performance.
+
+### Thread Safety
+
+The implementation uses thread locks to ensure thread safety when accessing shared data between the control loop and the ROS2 callback functions. This is crucial for preventing race conditions that could lead to erratic robot behavior.
+
+```python
+from threading import Lock
+
+class SmoothRobotMover(Node):
+    def __init__(self):
+        super().__init__('smooth_robot_mover')
+
+        # Create a lock for thread safety
+        self.lock = Lock()
+
+        # ... other initialization code ...
+
+    def control_loop(self):
+        with self.lock:  # Acquire lock before accessing shared data
+            # Update robot state
+            # ...
+
+    def publish_joint_states(self):
+        with self.lock:  # Acquire lock before accessing shared data
+            # Publish current joint positions
+            # ...
 ```
 
-### 2. Constrained Motion Planning
+The lock ensures that the control loop and the joint state publisher don't simultaneously access and modify the shared robot state data, which could lead to inconsistent states or data corruption.
 
-The project supports constrained motion planning for maintaining orientation:
+### Error Handling
 
-```cpp
-bool PickPlaceNode::executeConstrainedMotion(const geometry_msgs::msg::Pose& target_pose)
-{
-    // Create orientation constraint
-    moveit_msgs::msg::OrientationConstraint ocm;
-    ocm.link_name = "tool0";
-    ocm.header.frame_id = "base_link";
-    ocm.orientation = target_pose.orientation;
-    ocm.absolute_x_axis_tolerance = 0.1;
-    ocm.absolute_y_axis_tolerance = 0.1;
-    ocm.absolute_z_axis_tolerance = 0.1;
-    ocm.weight = 1.0;
-    
-    // Create path constraint
-    moveit_msgs::msg::Constraints constraints;
-    constraints.orientation_constraints.push_back(ocm);
-    
-    // Set the path constraint
-    arm_group_->setPathConstraints(constraints);
-    
-    // Plan and execute
-    arm_group_->setPoseTarget(target_pose);
-    moveit::planning_interface::MoveGroupInterface::Plan plan;
-    bool success = (arm_group_->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    
-    if (!success) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to plan with constraints");
-        arm_group_->clearPathConstraints();
-        return false;
-    }
-    
-    success = (arm_group_->execute(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    
-    // Clear the path constraints
-    arm_group_->clearPathConstraints();
-    
-    return success;
-}
+The code includes comprehensive error handling for various scenarios:
+
+1. **Joint Limit Violations**: The code checks if the calculated joint positions exceed the defined limits and clamps them if necessary.
+
+```python
+def clamp_joint_position(self, joint_index, position):
+    """Clamp joint position to within limits"""
+    min_limit = self.joint_limits[joint_index][0]
+    max_limit = self.joint_limits[joint_index][1]
+
+    if position < min_limit:
+        return min_limit
+    elif position > max_limit:
+        return max_limit
+    else:
+        return position
 ```
 
-### 3. Visual Servoing
+2. **Angle Wrapping Issues**: The code properly handles angle wrapping for revolute joints to ensure the robot takes the shortest path.
 
-The project includes a basic visual servoing implementation for precise positioning:
+```python
+def shortest_angular_distance(self, from_angle, to_angle):
+    """Calculate shortest angular distance between two angles"""
+    diff = to_angle - from_angle
 
-```cpp
-bool PickPlaceNode::executeVisualServoing(const std::string& object_id)
-{
-    // In a real system, this would use camera feedback
-    // For this simulation, we use the known object pose with some noise
-    
-    geometry_msgs::msg::Pose object_pose;
-    if (!getObjectPose(object_id, object_pose)) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to get object pose");
-        return false;
-    }
-    
-    // Add some noise to simulate camera error
-    object_pose.position.x += 0.005 * (2.0 * rand() / RAND_MAX - 1.0);
-    object_pose.position.y += 0.005 * (2.0 * rand() / RAND_MAX - 1.0);
-    object_pose.position.z += 0.005 * (2.0 * rand() / RAND_MAX - 1.0);
-    
-    // Set the target pose
-    geometry_msgs::msg::Pose target_pose = object_pose;
-    target_pose.position.z += 0.1;  // 10cm above object
-    
-    // Execute Cartesian path to the target
-    return executeCartesianPath(arm_group_->getCurrentPose().pose, target_pose, 0.01, 0.0);
-}
+    # Handle angle wrapping
+    if abs(diff) > math.pi:
+        if diff > 0:
+            diff = diff - 2 * math.pi
+        else:
+            diff = diff + 2 * math.pi
+
+    return diff
 ```
 
-### 4. Force Control
+3. **Timing Inconsistencies**: The code uses a fixed time increment to ensure consistent timing between updates, preventing timing-related glitches.
 
-The project includes a simulated force control implementation for compliant manipulation:
-
-```cpp
-bool PickPlaceNode::executeForceControl(const geometry_msgs::msg::Pose& target_pose, double force)
-{
-    // In a real system, this would use force/torque sensor feedback
-    // For this simulation, we use a simplified model
-    
-    // Move to the target pose
-    arm_group_->setPoseTarget(target_pose);
-    moveit::planning_interface::MoveGroupInterface::Plan plan;
-    bool success = (arm_group_->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    
-    if (!success) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to plan to target pose");
-        return false;
-    }
-    
-    success = (arm_group_->execute(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-    
-    if (!success) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to move to target pose");
-        return false;
-    }
-    
-    // Simulate force control by moving down slowly until contact
-    geometry_msgs::msg::Pose current_pose = arm_group_->getCurrentPose().pose;
-    geometry_msgs::msg::Pose force_pose = current_pose;
-    force_pose.position.z -= 0.05;  // Move down 5cm
-    
-    std::vector<geometry_msgs::msg::Pose> waypoints;
-    waypoints.push_back(current_pose);
-    waypoints.push_back(force_pose);
-    
-    moveit_msgs::msg::RobotTrajectory trajectory;
-    double fraction = arm_group_->computeCartesianPath(waypoints, 0.001, 0.0, trajectory);
-    
-    // Execute the trajectory
-    moveit::planning_interface::MoveGroupInterface::Plan force_plan;
-    force_plan.trajectory_ = trajectory;
-    
-    return (arm_group_->execute(force_plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
-}
+```python
+def control_loop(self):
+    # Use a fixed time increment
+    dt = 0.01  # 10ms (100Hz)
+    self.motion_time += dt
 ```
 
-## Extending the Project
+4. **Exception Handling**: The code includes try-except blocks to catch and handle exceptions gracefully.
 
-### 1. Adding Perception
+```python
+try:
+    # Perform operation that might raise an exception
+    # ...
+except Exception as e:
+    self.get_logger().error(f'Error: {str(e)}')
+    # Handle the error or provide a fallback
+```
 
-To add real perception capabilities:
+### Performance Optimization
 
-1. **Install ROS 2 perception packages**:
-   ```bash
-   sudo apt install ros-jazzy-perception
-   ```
+Several optimizations are implemented to ensure smooth motion and efficient execution:
 
-2. **Add a camera to the robot**:
-   ```xml
-   <link name="camera_link">
-     <!-- Camera link properties -->
-   </link>
-   
-   <joint name="camera_joint" type="fixed">
-     <parent link="wrist_3_link"/>
-     <child link="camera_link"/>
-     <origin xyz="0 0 0.05" rpy="0 0 0"/>
-   </joint>
-   
-   <gazebo reference="camera_link">
-     <sensor type="camera" name="camera">
-       <!-- Camera properties -->
-       <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
-         <!-- Plugin properties -->
-       </plugin>
-     </sensor>
-   </gazebo>
-   ```
+1. **High Control Rate**: The control loop runs at 100 Hz for ultra-smooth motion.
 
-3. **Implement object detection**:
-   ```cpp
-   void PickPlaceNode::detectObjectsFromCamera()
-   {
-       // Subscribe to camera topic
-       auto camera_sub = this->create_subscription<sensor_msgs::msg::Image>(
-           "/camera/image_raw", 10,
-           std::bind(&PickPlaceNode::cameraCallback, this, std::placeholders::_1)
-       );
-       
-       // Process the image in the callback
-   }
-   
-   void PickPlaceNode::cameraCallback(const sensor_msgs::msg::Image::SharedPtr msg)
-   {
-       // Convert ROS image to OpenCV format
-       cv_bridge::CvImagePtr cv_ptr;
-       try {
-           cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-       } catch (cv_bridge::Exception& e) {
-           RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
-           return;
-       }
-       
-       // Use OpenCV for object detection
-       // ...
-       
-       // Update object poses
-       // ...
-   }
-   ```
+```python
+# Create a timer that calls the control loop at 100Hz
+self.create_timer(1.0/100.0, self.control_loop)
+```
 
-### 2. Adding Multiple Robots
+2. **Precomputed Trajectories**: Trajectory parameters are precomputed to minimize computational load during execution.
 
-To extend the project with multiple robots:
+```python
+def precompute_trajectory_parameters(self):
+    """Precompute parameters for the trajectory to improve performance"""
+    self.trajectory_params = []
 
-1. **Modify the URDF to include multiple robots**:
-   ```xml
-   <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="multi_ur3">
-     <!-- First UR3 robot -->
-     <xacro:include filename="$(find ur_description)/urdf/ur3.urdf.xacro" />
-     <xacro:ur3_robot prefix="robot1_" />
-     
-     <!-- Second UR3 robot -->
-     <xacro:ur3_robot prefix="robot2_" />
-     
-     <!-- Position the robots -->
-     <link name="world" />
-     
-     <joint name="robot1_base_joint" type="fixed">
-       <parent link="world" />
-       <child link="robot1_base_link" />
-       <origin xyz="0 0.5 0" rpy="0 0 0" />
-     </joint>
-     
-     <joint name="robot2_base_joint" type="fixed">
-       <parent link="world" />
-       <child link="robot2_base_link" />
-       <origin xyz="0 -0.5 0" rpy="0 0 0" />
-     </joint>
-   </robot>
-   ```
+    for i in range(len(self.key_poses) - 1):
+        start_pose = self.key_poses[i]
+        end_pose = self.key_poses[i + 1]
 
-2. **Create separate MoveIt configurations for each robot**:
-   ```yaml
-   # robot1_moveit_planning.yaml
-   robot1_move_group:
-     ros__parameters:
-       # ... configuration for robot1 ...
-   
-   # robot2_moveit_planning.yaml
-   robot2_move_group:
-     ros__parameters:
-       # ... configuration for robot2 ...
-   ```
+        params = []
+        for j in range(len(start_pose)):
+            # Calculate shortest path
+            diff = self.shortest_angular_distance(start_pose[j], end_pose[j])
+            params.append((start_pose[j], diff))
 
-3. **Implement coordination between robots**:
-   ```cpp
-   class MultiRobotPickPlaceNode : public rclcpp::Node
-   {
-   public:
-       MultiRobotPickPlaceNode() : Node("multi_robot_pick_place_node")
-       {
-           // Initialize MoveIt interfaces for both robots
-           robot1_arm_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
-               shared_from_this(), "robot1_ur_manipulator"
-           );
-           
-           robot2_arm_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
-               shared_from_this(), "robot2_ur_manipulator"
-           );
-           
-           // ... rest of initialization ...
-       }
-       
-       void executeCoordinatedTask()
-       {
-           // Plan and execute motions for both robots
-           // Ensure coordination and collision avoidance
-       }
-       
-   private:
-       std::shared_ptr<moveit::planning_interface::MoveGroupInterface> robot1_arm_group_;
-       std::shared_ptr<moveit::planning_interface::MoveGroupInterface> robot2_arm_group_;
-       // ... other members ...
-   };
-   ```
+        self.trajectory_params.append(params)
+```
 
-### 3. Adding Custom Motion Planning
+3. **Efficient Angle Calculations**: Optimized algorithms for calculating the shortest path between joint angles.
 
-To implement custom motion planning algorithms:
+4. **Minimal Memory Allocation**: The code reuses existing arrays and objects where possible to minimize garbage collection overhead.
 
-1. **Create a custom planning plugin**:
-   ```cpp
-   #include <moveit/planning_interface/planning_interface.h>
-   
-   namespace custom_planner
-   {
-   
-   class CustomPlanner : public planning_interface::PlanningContext
-   {
-   public:
-       CustomPlanner(const std::string& name, const std::string& group);
-       
-       void solve(planning_interface::MotionPlanResponse& res) override;
-       void solve(planning_interface::MotionPlanDetailedResponse& res) override;
-       
-       bool terminate() override;
-       void clear() override;
-       
-   private:
-       // Custom planning algorithm implementation
-   };
-   
-   class CustomPlannerManager : public planning_interface::PlannerManager
-   {
-   public:
-       CustomPlannerManager() : planning_interface::PlannerManager()
-       {
-       }
-       
-       bool initialize(const moveit::core::RobotModelConstPtr& model, const std::string& ns) override;
-       
-       std::string getDescription() const override;
-       
-       void getPlanningAlgorithms(std::vector<std::string>& algs) const override;
-       
-       planning_interface::PlanningContextPtr getPlanningContext(
-           const planning_scene::PlanningSceneConstPtr& planning_scene,
-           const planning_interface::MotionPlanRequest& req,
-           moveit_msgs::msg::MoveItErrorCodes& error_code) const override;
-       
-   private:
-       moveit::core::RobotModelConstPtr robot_model_;
-   };
-   
-   } // namespace custom_planner
-   ```
+```python
+# Reuse existing message object
+self.joint_state_msg.position = self.current_positions
+```
 
-2. **Register the plugin**:
-   ```cpp
-   #include <pluginlib/class_list_macros.hpp>
-   
-   PLUGINLIB_EXPORT_CLASS(custom_planner::CustomPlannerManager, planning_interface::PlannerManager)
-   ```
+5. **Optimized Visualization**: The RViz configuration is optimized to minimize CPU and GPU usage while still providing a clear visualization of the robot.
 
-3. **Create a plugin description file**:
-   ```xml
-   <library path="libcustom_planner">
-     <class name="custom_planner/CustomPlanner" type="custom_planner::CustomPlannerManager" base_class_type="planning_interface::PlannerManager">
-       <description>
-         A custom motion planning algorithm.
-       </description>
-     </class>
-   </library>
-   ```
+## Setup and Installation
 
-4. **Configure MoveIt to use the custom planner**:
-   ```yaml
-   move_group:
-     ros__parameters:
-       planning_plugin: "custom_planner/CustomPlanner"
-       # ... other parameters ...
-   ```
+### Hardware Requirements
 
-## Performance Optimization
+To run the UR3 Robot Pick and Place Simulation, the following hardware is recommended:
 
-### 1. Planning Time Optimization
+- **Computer**: Modern computer with Ubuntu 22.04 or later
+- **CPU**: Dual-core processor or better (quad-core recommended)
+- **RAM**: Minimum 4GB (8GB recommended)
+- **Graphics**: Graphics card with OpenGL 3.3+ support
+- **Storage**: At least 10GB of free disk space
+- **Network**: Internet connection for package installation
 
-To optimize planning time:
+### Software Requirements
 
-1. **Adjust planning time limits**:
-   ```yaml
-   move_group:
-     ros__parameters:
-       planning_time: 5.0  # Limit planning time to 5 seconds
-   ```
+The simulation requires the following software:
 
-2. **Use faster planning algorithms**:
-   ```yaml
-   ur_manipulator:
-     default_planner_config: RRTConnectkConfigDefault  # Fast bi-directional RRT
-   ```
+- **Operating System**: Ubuntu 22.04 LTS (Jammy Jellyfish) or later
+- **ROS2**: Jazzy Jalisco distribution (or compatible version like Humble Hawksbill)
+- **Python**: Version 3.12 or later
+- **Xacro**: Version 1.14.0 or later
+- **RViz2**: With mesh visualization support
+- **Git**: For downloading mesh files
+- **CMake**: Version 3.16.3 or later
+- **Colcon**: Build tools for ROS2 packages
+- **Bash**: Shell environment
 
-3. **Optimize planning parameters**:
-   ```yaml
-   RRTConnectkConfigDefault:
-     type: geometric::RRTConnect
-     range: 0.0  # Auto-tune the range parameter
-     goal_bias: 0.05  # Lower goal bias for faster exploration
-   ```
+### Package Dependencies
 
-### 2. Trajectory Execution Optimization
+The following ROS2 packages are required:
 
-To optimize trajectory execution:
+#### Core ROS2 Packages
+- **robot_state_publisher**: Publishes the robot's state to TF2 (version 3.0.0 or later)
+- **joint_state_publisher**: Publishes joint state information (version 2.2.0 or later)
+- **xacro**: XML macro language for creating URDF files (version 2.0.5 or later)
+- **rviz2**: 3D visualization tool for ROS2 (version 11.2.0 or later)
+- **tf2**: Transform library for tracking coordinate frames (version 0.25.0 or later)
+- **tf2_ros**: ROS2 bindings for the TF2 library (version 0.25.0 or later)
 
-1. **Adjust controller parameters**:
-   ```yaml
-   arm_controller:
-     ros__parameters:
-       state_publish_rate: 100.0  # Higher update rate
-       action_monitor_rate: 50.0  # Higher monitoring rate
-   ```
+#### Python Dependencies
+- **rclpy**: ROS2 client library for Python (version 3.3.0 or later)
+- **sensor_msgs**: Standard messages for sensor data (version 4.2.0 or later)
+- **geometry_msgs**: Standard messages for geometric data (version 4.2.0 or later)
+- **numpy**: Numerical computing library
+- **threading**: Threading library (included in standard library)
+- **math**: Mathematical functions (included in standard library)
 
-2. **Tune joint velocity and acceleration limits**:
-   ```yaml
-   joint_limits:
-     shoulder_pan_joint:
-       has_velocity_limits: true
-       max_velocity: 4.0  # Increase from default
-       has_acceleration_limits: true
-       max_acceleration: 8.0  # Increase from default
-   ```
+### Installation Steps
 
-3. **Use time-optimal trajectory parameterization**:
-   ```yaml
-   move_group:
-     ros__parameters:
-       request_adapters: [default_planner_request_adapters/AddTimeOptimalParameterization, ...]
-   ```
+1. **Install ROS2 Jazzy Jalisco**:
 
-### 3. Collision Checking Optimization
+```bash
+# Set locale
+sudo apt update && sudo apt install locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
 
-To optimize collision checking:
+# Setup sources
+sudo apt install software-properties-common
+sudo add-apt-repository universe
+sudo apt update && sudo apt install curl -y
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
 
-1. **Simplify collision meshes**:
-   Use simplified meshes for collision checking while keeping detailed meshes for visualization.
+# Install ROS2 packages
+sudo apt update
+sudo apt install ros-jazzy-desktop
+```
 
-2. **Adjust collision checking resolution**:
-   ```yaml
-   move_group:
-     ros__parameters:
-       collision_detector: FCL
-       collision_detector_options:
-         resolution: 0.01  # Coarser resolution for faster checking
-   ```
+2. **Install Additional Dependencies**:
 
-3. **Disable collision checking between specific links**:
-   ```xml
-   <disable_collisions link1="link1" link2="link2" reason="Never" />
-   ```
+```bash
+# Install Python 3.12
+sudo apt install python3.12 python3.12-dev python3.12-venv
 
-## Real Hardware Integration
+# Install ROS2 dependencies
+sudo apt install ros-jazzy-robot-state-publisher ros-jazzy-joint-state-publisher ros-jazzy-xacro ros-jazzy-rviz2
+```
 
-### 1. Hardware Interface
+3. **Create a ROS2 Workspace**:
 
-To integrate with real UR3 hardware:
+```bash
+mkdir -p ~/ros2_workspaces/ros2_ws/src
+cd ~/ros2_workspaces/ros2_ws/src
+```
 
-1. **Install the UR ROS 2 driver**:
-   ```bash
-   sudo apt install ros-jazzy-ur-robot-driver
-   ```
+4. **Create the UR3 Package**:
 
-2. **Configure the hardware interface**:
-   ```yaml
-   ur_hardware_interface:
-     ros__parameters:
-       robot_ip: 192.168.1.100  # IP address of the UR3 robot
-       use_tool_communication: true
-       tool_voltage: 24
-       tool_parity: 0
-       tool_baud_rate: 115200
-       tool_stop_bits: 1
-       tool_rx_idle_chars: 1.5
-       tool_tx_idle_chars: 3.5
-       tool_device_name: /tmp/ttyUR
-       reverse_port: 50001
-       script_sender_port: 50002
-       trajectory_port: 50003
-   ```
+```bash
+mkdir -p ur3_pick_place/meshes/{visual,collision}
+mkdir -p ur3_pick_place/launch
+```
 
-3. **Launch the hardware interface**:
-   ```bash
-   ros2 launch ur_robot_driver ur3_bringup.launch.py robot_ip:=192.168.1.100
-   ```
+5. **Download UR3 Mesh Files**:
 
-### 2. Calibration
+```bash
+# Create directories for meshes
+mkdir -p ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual
+mkdir -p ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision
 
-To calibrate the robot for accurate positioning:
+# Download mesh files
+cd ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes
+git clone https://github.com/ros-industrial/universal_robot.git temp
+cp -r temp/ur_description/meshes/ur3/visual/* visual/
+cp -r temp/ur_description/meshes/ur3/collision/* collision/
+rm -rf temp
+```
 
-1. **Perform robot calibration**:
-   ```bash
-   ros2 launch ur_calibration calibration_correction.launch.py \
-     robot_ip:=192.168.1.100 \
-     target_filename:=$(ros2 pkg prefix ur_description)/share/ur_description/urdf/ur3_calibration.yaml
-   ```
+## Project Setup
 
-2. **Load the calibration file**:
-   ```bash
-   ros2 launch ur_robot_driver ur3_bringup.launch.py \
-     robot_ip:=192.168.1.100 \
-     kinematics_config:=$(ros2 pkg prefix ur_description)/share/ur_description/urdf/ur3_calibration.yaml
-   ```
+### Creating the URDF File
 
-### 3. Safety Configuration
+Create a file named `ur3_absolute_paths_direct.urdf.xacro` in your workspace:
 
-To ensure safe operation with real hardware:
+```bash
+cd ~/ros2_workspaces
+nano ur3_absolute_paths_direct.urdf.xacro
+```
 
-1. **Configure safety parameters**:
-   ```yaml
-   ur_hardware_interface:
-     ros__parameters:
-       safety_mode: NORMAL
-       safety_pos_limit: 1.0  # Position limit in radians
-       safety_k_position: 20.0  # Position limit stiffness
-   ```
+The URDF file should include the robot's links, joints, visual meshes, collision meshes, and inertial properties. Here's a simplified example:
 
-2. **Implement emergency stop handling**:
-   ```cpp
-   void PickPlaceNode::emergencyStopCallback(const std_msgs::msg::Bool::SharedPtr msg)
-   {
-       if (msg->data) {
-           RCLCPP_ERROR(this->get_logger(), "Emergency stop triggered!");
-           
-           // Stop all motion
-           arm_group_->stop();
-           
-           // Release the gripper
-           controlGripper(1.0);  // Fully open
-           
-           // Set the emergency stop flag
-           emergency_stop_ = true;
-       } else {
-           RCLCPP_INFO(this->get_logger(), "Emergency stop released");
-           emergency_stop_ = false;
-       }
-   }
-   ```
+```xml
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur3">
+  <!-- Materials -->
+  <material name="UR_Blue">
+    <color rgba="0.1 0.1 0.8 1.0"/>
+  </material>
 
-3. **Add collision detection and avoidance**:
-   ```cpp
-   void PickPlaceNode::monitorCollisions()
-   {
-       auto collision_sub = this->create_subscription<moveit_msgs::msg::ContactsState>(
-           "/collision_detection_contacts", 10,
-           std::bind(&PickPlaceNode::collisionCallback, this, std::placeholders::_1)
-       );
-   }
-   
-   void PickPlaceNode::collisionCallback(const moveit_msgs::msg::ContactsState::SharedPtr msg)
-   {
-       if (!msg->contacts.empty()) {
-           RCLCPP_WARN(this->get_logger(), "Collision detected!");
-           
-           // Stop motion
-           arm_group_->stop();
-           
-           // Plan a recovery motion
-           planRecoveryMotion();
-       }
-   }
-   ```
+  <!-- Base Link -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <mesh filename="file:///home/lachu/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/base.dae"/>
+      </geometry>
+      <material name="UR_Blue"/>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="file:///home/lachu/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/base.stl"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="4.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.00443333156" ixy="0.0" ixz="0.0" iyy="0.00443333156" iyz="0.0" izz="0.0072"/>
+    </inertial>
+  </link>
 
-By following these guidelines and implementing the suggested optimizations and extensions, you can create a robust and flexible pick and place application that can be adapted to various use cases and hardware configurations.
+  <!-- Additional links and joints would be defined here -->
+
+  <!-- World link -->
+  <link name="world"/>
+
+  <joint name="world_joint" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+</robot>
+```
+
+### Creating the Robot Mover Script
+
+Create a file named `smooth_robot_mover.py` in your workspace:
+
+```bash
+cd ~/ros2_workspaces
+nano smooth_robot_mover.py
+```
+
+Here's a simplified version of the script:
+
+```python
+#!/usr/bin/env python3.12
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+import math
+import numpy as np
+from threading import Lock
+
+class SmoothRobotMover(Node):
+    def __init__(self):
+        super().__init__('smooth_robot_mover')
+
+        # Create a lock for thread safety
+        self.lock = Lock()
+
+        # Define joint names
+        self.joint_names = [
+            'shoulder_pan_joint',
+            'shoulder_lift_joint',
+            'elbow_joint',
+            'wrist_1_joint',
+            'wrist_2_joint',
+            'wrist_3_joint'
+        ]
+
+        # Define key poses for the pick and place sequence
+        self.key_poses = [
+            # Home position
+            [0.0, -1.57, 0.0, -1.57, 0.0, 0.0],
+            # Pre-grasp approach
+            [0.5, -1.0, 0.5, -1.57, 0.0, 0.0],
+            # ... additional poses ...
+        ]
+
+        # Initialize state variables
+        self.current_positions = self.key_poses[0].copy()
+        self.current_pose_index = 0
+        self.next_pose_index = 1
+        self.is_dwelling = True
+        self.dwell_timer = 0.0
+        self.motion_time = 0.0
+
+        # Motion parameters
+        self.motion_duration = 8.0  # seconds to move between poses
+        self.dwell_time = 2.0  # seconds to pause at each pose
+
+        # Create publisher for joint states
+        self.joint_state_publisher = self.create_publisher(
+            JointState,
+            '/joint_states',
+            10
+        )
+
+        # Create joint state message
+        self.joint_state_msg = JointState()
+        self.joint_state_msg.name = self.joint_names
+
+        # Create timers for control loop and publishing
+        self.create_timer(1.0/100.0, self.control_loop)  # 100Hz control loop
+        self.create_timer(1.0/50.0, self.publish_joint_states)  # 50Hz publishing
+
+        self.get_logger().info('Smooth Robot Mover initialized')
+
+    def minimum_jerk(self, t):
+        """Minimum jerk trajectory function."""
+        return 10 * (t**3) - 15 * (t**4) + 6 * (t**5)
+
+    def control_loop(self):
+        """Main control loop for smooth robot motion"""
+        with self.lock:
+            # Update timers
+            dt = 0.01  # 10ms (100Hz)
+
+            if self.is_dwelling:
+                # We're pausing at a pose
+                self.dwell_timer += dt
+                if self.dwell_timer >= self.dwell_time:
+                    # Done dwelling, start moving to next pose
+                    self.is_dwelling = False
+                    self.motion_time = 0.0
+                    self.next_pose_index = (self.current_pose_index + 1) % len(self.key_poses)
+            else:
+                # We're moving between poses
+                self.motion_time += dt
+
+                if self.motion_time >= self.motion_duration:
+                    # Reached the target pose, start dwelling
+                    self.current_pose_index = self.next_pose_index
+                    self.is_dwelling = True
+                    self.dwell_timer = 0.0
+
+                    # Set exact pose values
+                    self.current_positions = self.key_poses[self.current_pose_index].copy()
+                else:
+                    # Interpolate between poses
+                    t = self.motion_time / self.motion_duration
+                    smooth_t = self.minimum_jerk(t)
+
+                    # Interpolate each joint position
+                    for i in range(len(self.current_positions)):
+                        start_pos = self.key_poses[self.current_pose_index][i]
+                        end_pos = self.key_poses[self.next_pose_index][i]
+
+                        # Handle angle wrapping
+                        diff = end_pos - start_pos
+                        if abs(diff) > math.pi:
+                            if diff > 0:
+                                diff = diff - 2 * math.pi
+                            else:
+                                diff = diff + 2 * math.pi
+                            end_pos = start_pos + diff
+
+                        # Apply minimum jerk trajectory
+                        self.current_positions[i] = start_pos + smooth_t * (end_pos - start_pos)
+
+    def publish_joint_states(self):
+        """Publish current joint positions"""
+        with self.lock:
+            # Update message
+            self.joint_state_msg.header.stamp = self.get_clock().now().to_msg()
+            self.joint_state_msg.position = self.current_positions
+
+            # Publish
+            self.joint_state_publisher.publish(self.joint_state_msg)
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = SmoothRobotMover()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+```
+
+Make the script executable:
+
+```bash
+chmod +x smooth_robot_mover.py
+```
+
+### Creating a Launch Script
+
+Create a file named `launch_ur3_mesh_visualization.sh` in your workspace:
+
+```bash
+cd ~/ros2_workspaces
+nano launch_ur3_mesh_visualization.sh
+```
+
+Add the following content:
+
+```bash
+#!/bin/bash
+
+# Source ROS2 environment
+source /opt/ros/jazzy/setup.bash
+
+# Kill any existing processes
+pkill -f "rviz2" || true
+pkill -f "robot_state_publisher" || true
+pkill -f "smooth_robot_mover.py" || true
+
+# Wait for processes to terminate
+sleep 2
+
+# Start the robot state publisher with the mesh URDF
+ros2 run robot_state_publisher robot_state_publisher --ros-args -p robot_description:="$(xacro ur3_absolute_paths_direct.urdf.xacro)" &
+ROBOT_STATE_PUBLISHER_PID=$!
+
+# Wait for the robot state publisher to start
+sleep 3
+
+# Start the robot mover
+python3.12 smooth_robot_mover.py &
+ROBOT_MOVER_PID=$!
+
+# Wait for the robot mover to start
+sleep 3
+
+# Start RViz2
+rviz2 -d simple_config.rviz &
+RVIZ_PID=$!
+
+# Wait for RViz2 to start
+sleep 3
+
+echo "All components started successfully!"
+echo "Robot State Publisher PID: $ROBOT_STATE_PUBLISHER_PID"
+echo "Robot Mover PID: $ROBOT_MOVER_PID"
+echo "RViz2 PID: $RVIZ_PID"
+
+# Wait for user to press Ctrl+C
+echo "Press Ctrl+C to stop all components"
+wait $RVIZ_PID
+
+# Kill all components
+kill $ROBOT_STATE_PUBLISHER_PID $ROBOT_MOVER_PID $RVIZ_PID || true
+```
+
+Make the script executable:
+
+```bash
+chmod +x launch_ur3_mesh_visualization.sh
+```
+
+### Creating an RViz Configuration
+
+Create a file named `simple_config.rviz` in your workspace:
+
+```bash
+cd ~/ros2_workspaces
+nano simple_config.rviz
+```
+
+You can generate this file by running RViz once and saving the configuration, or use a basic configuration that includes:
+- Global Options: Fixed Frame set to "world"
+- RobotModel display with Description Topic set to "/robot_description"
+- TF display
+
+## Running the Simulation
+
+### Method 1: Using the Launch Script
+
+```bash
+cd ~/ros2_workspaces
+./launch_ur3_mesh_visualization.sh
+```
+
+This script starts all the necessary components: the robot state publisher, the smooth robot mover, and RViz for visualization.
+
+### Method 2: Running Components Individually
+
+Open three terminal windows:
+
+Terminal 1 (Robot State Publisher):
+```bash
+cd ~/ros2_workspaces
+source /opt/ros/jazzy/setup.bash
+ros2 run robot_state_publisher robot_state_publisher --ros-args -p robot_description:="$(xacro ur3_absolute_paths_direct.urdf.xacro)"
+```
+
+Terminal 2 (Robot Mover):
+```bash
+cd ~/ros2_workspaces
+source /opt/ros/jazzy/setup.bash
+python3.12 smooth_robot_mover.py
+```
+
+Terminal 3 (RViz):
+```bash
+cd ~/ros2_workspaces
+source /opt/ros/jazzy/setup.bash
+rviz2 -d simple_config.rviz
+```
+
+## Troubleshooting
+
+### Mesh Files Not Displaying
+
+**Error**: Robot appears as simple shapes instead of detailed meshes.
+
+**Symptoms**:
+- Robot appears as basic geometric shapes (cylinders, boxes) instead of detailed meshes
+- RViz console shows warnings about missing mesh files
+- Error messages like "Could not load resource [mesh file path]"
+
+**Solutions**:
+- Check that the mesh file paths in the URDF are correct and point to existing files
+  ```bash
+  # Verify mesh files exist
+  ls -la ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/
+  ls -la ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/
+  ```
+
+- Ensure the mesh files have the correct permissions
+  ```bash
+  # Set correct permissions
+  chmod 644 ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/*.dae
+  chmod 644 ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/*.stl
+  ```
+
+- Try using absolute file paths with the `file://` prefix in the URDF
+  ```xml
+  <mesh filename="file:///home/lachu/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/base.dae"/>
+  ```
+
+- Check RViz settings: ensure "Visual Enabled" is checked in the RobotModel display
+  1. In RViz, select the "RobotModel" display in the left panel
+  2. Make sure "Visual Enabled" is checked
+  3. Set "Description Topic" to "/robot_description"
+
+- Verify that the mesh files are in the correct format
+  ```bash
+  # Check file types
+  file ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/visual/*.dae
+  file ~/ros2_workspaces/ros2_ws/src/ur3_pick_place/meshes/collision/*.stl
+  ```
+
+### Glitchy Robot Movement
+
+**Error**: Robot movement is jerky or has sudden jumps.
+
+**Symptoms**:
+- Robot motion appears jerky or stutters during movement
+- Sudden jumps or teleportations between positions
+- Inconsistent speed during motion
+- Joint angles occasionally appear to "flip" or take the long way around
+
+**Solutions**:
+
+- Increase the publishing rate in the robot mover script
+  ```python
+  # Change from 50Hz to 100Hz or higher
+  self.create_timer(1.0/100.0, self.publish_joint_states)
+  ```
+
+- Increase the number of interpolation points between waypoints
+  ```python
+  # Increase interpolation steps
+  self.interpolation_steps = 500  # More steps for smoother motion
+  ```
+
+- Use a smoother interpolation function (e.g., minimum jerk trajectory)
+  ```python
+  def minimum_jerk(self, t):
+      """Minimum jerk trajectory function.
+      This produces extremely smooth motion with zero velocity and acceleration at endpoints."""
+      return 10 * (t**3) - 15 * (t**4) + 6 * (t**5)
+  ```
+
+- Add thread safety with locks to prevent race conditions
+  ```python
+  from threading import Lock
+
+  # In __init__
+  self.lock = Lock()
+
+  # In methods that access shared data
+  with self.lock:
+      # Access shared data here
+  ```
+
+- Ensure consistent timing in the control loop
+  ```python
+  # Use a fixed time increment
+  dt = 0.01  # 10ms (100Hz)
+  self.motion_time += dt
+  ```
+
+### RViz Crashes
+
+**Error**: RViz crashes when trying to display the robot.
+
+**Solutions**:
+- Check for errors in the URDF file
+- Ensure the mesh files are in the correct format
+- Reduce the complexity of the mesh files
+- Update your graphics drivers
+- Increase the memory available to RViz
+
+### Robot State Publisher Errors
+
+**Error**: Robot state publisher fails to start or publish transforms.
+
+**Solutions**:
+- Check the URDF for syntax errors
+- Ensure all joint names in the URDF match those used in the joint states message
+- Check that the robot_description parameter is being set correctly
+- Verify that the TF tree is complete and connected
+
+### Python Script Errors
+
+**Error**: The robot mover script fails to run or has runtime errors.
+
+**Solutions**:
+- Check Python version compatibility (script requires Python 3.12)
+- Ensure all required Python packages are installed
+- Check for syntax errors in the script
+- Verify that the joint names match those in the URDF
+- Check the ROS2 node initialization and shutdown procedures
+
+## Customizing the Simulation
+
+### Modifying the Robot's Motion
+
+To change the robot's motion pattern, edit the `key_poses` list in the `smooth_robot_mover.py` file:
+
+```python
+self.key_poses = [
+    # Home position
+    [0.0, -1.57, 0.0, -1.57, 0.0, 0.0],
+
+    # Add or modify poses here
+    # Format: [joint1, joint2, joint3, joint4, joint5, joint6]
+]
+```
+
+Each pose is defined as a list of 6 joint angles in radians, corresponding to the 6 joints of the UR3 robot:
+1. `shoulder_pan_joint`: Rotation of the base (around Z axis)
+2. `shoulder_lift_joint`: Shoulder joint (around Y axis)
+3. `elbow_joint`: Elbow joint (around Y axis)
+4. `wrist_1_joint`: First wrist joint (around Y axis)
+5. `wrist_2_joint`: Second wrist joint (around Z axis)
+6. `wrist_3_joint`: Third wrist joint (around Y axis)
+
+You can add as many poses as needed to create complex motion sequences. For example, to add a new pose where the robot reaches higher:
+
+```python
+# Reach high pose
+[0.0, -0.5, 0.3, -1.0, 0.0, 0.0],
+```
+
+### Adjusting Motion Parameters
+
+To make the motion faster, slower, or smoother, adjust these parameters in the script:
+
+```python
+# Speed control
+self.motion_duration = 8.0  # seconds to move between poses (increase for slower motion)
+self.dwell_time = 2.0  # seconds to pause at each pose
+
+# Smoothness control
+self.create_timer(1.0/100.0, self.control_loop)  # control loop frequency (Hz)
+```
+
+For ultra-smooth motion, you can also adjust the trajectory generation parameters:
+
+```python
+# Use a different smoothing function
+def custom_smoothing(self, t):
+    # Sigmoid function for even smoother transitions
+    return 1.0 / (1.0 + math.exp(-12 * (t - 0.5)))
+```
+
+### Using Different Mesh Files
+
+To use different mesh files, update the file paths in the URDF file:
+
+```xml
+<mesh filename="file:///path/to/your/mesh/file.dae"/>
+```
+
+You can use mesh files from different robot models or create your own custom meshes. Supported formats include:
+- `.dae` (COLLADA) for visual meshes
+- `.stl` (STereoLithography) for collision meshes
+
+When creating custom meshes, ensure they:
+- Have the correct scale (meters)
+- Use the correct coordinate system (Z-up for URDF)
+- Have proper origins aligned with joint axes
+
+### Changing Robot Colors
+
+To change the robot's appearance, modify the material definitions in the URDF:
+
+```xml
+<material name="UR_Blue">
+  <color rgba="0.1 0.1 0.8 1.0"/>
+</material>
+
+<!-- Add new materials -->
+<material name="UR_Red">
+  <color rgba="0.8 0.1 0.1 1.0"/>
+</material>
+```
+
+Then apply the material to specific links:
+
+```xml
+<visual>
+  <geometry>
+    <mesh filename="file:///path/to/mesh.dae"/>
+  </geometry>
+  <material name="UR_Red"/>
+</visual>
+```
+
+### Adding Environment Objects
+
+To add objects to the environment (like tables, objects to pick, etc.), add new links to the URDF:
+
+```xml
+<link name="table">
+  <visual>
+    <origin xyz="0 0 -0.5" rpy="0 0 0"/>
+    <geometry>
+      <box size="1.0 1.0 0.05"/>
+    </geometry>
+    <material name="Grey"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 -0.5" rpy="0 0 0"/>
+    <geometry>
+      <box size="1.0 1.0 0.05"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="world_to_table" type="fixed">
+  <parent link="world"/>
+  <child link="table"/>
+  <origin xyz="0 0 0" rpy="0 0 0"/>
+</joint>
+```
+
+## Advanced Usage
+
+### Adding Collision Detection
+
+To add collision detection, you can integrate the simulation with MoveIt:
+
+```bash
+sudo apt install ros-jazzy-moveit
+```
+
+### Recording the Simulation
+
+To record the simulation as a video:
+
+```bash
+# Install required packages
+sudo apt install ffmpeg
+
+# Record the screen
+ffmpeg -f x11grab -s 1920x1080 -i :0.0 -r 30 -c:v libx264 -preset ultrafast -crf 0 output.mp4
+```
+
+### Exporting Joint Trajectories
+
+To export the joint trajectories for use in a real robot:
+
+```bash
+# Record joint states to a bag file
+ros2 bag record /joint_states
+```
+
+## Future Enhancements
+
+Potential enhancements to the simulation include:
+
+1. **Collision Detection**: Adding collision detection to avoid obstacles
+2. **Dynamic Object Interaction**: Simulating the physics of object interaction
+3. **Path Planning**: Implementing advanced path planning algorithms like RRT or PRM
+4. **Inverse Kinematics**: Adding inverse kinematics for end-effector positioning
+5. **Gazebo Integration**: Extending the simulation to Gazebo for physics-based simulation
+6. **MoveIt Integration**: Using MoveIt for advanced motion planning
+
+## Conclusion
+
+This report provides comprehensive documentation for the UR3 Robot Pick and Place Simulation project, covering implementation details, setup instructions, and troubleshooting. By following the instructions in this report, you should be able to set up and run a smooth, glitch-free robot simulation with accurate 3D mesh models in RViz.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
