@@ -201,7 +201,6 @@ XML-based formats are used for structural definitions:
 4. **C++ Source (.cpp, .hpp)**: Implementation of performance-critical components
 
 
-# UR3 Robot Pick and Place Simulation - Report 2
 ## Motion Planning, Trajectory Generation, and ROS2 Architecture
 
 ## Table of Contents
@@ -611,7 +610,7 @@ These executable script commands provide a comprehensive set of tools for runnin
 This report provides a comprehensive explanation of the motion planning, trajectory generation, and ROS2 architecture used in the UR3 Robot Pick and Place Simulation project. The next report will cover implementation details, setup instructions, and troubleshooting.
 
 
-# UR3 Robot Pick and Place Simulation - Report 3
+
 ## Implementation Details, Setup Instructions, and Troubleshooting
 
 *This comprehensive guide provides detailed information about the implementation, setup instructions, and troubleshooting for the UR3 Robot Pick and Place Simulation. It includes executable script commands, practical examples, and solutions to common issues.*
